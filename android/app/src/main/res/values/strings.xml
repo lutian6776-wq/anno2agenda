@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_label">知程 AI 识屏与静默截屏助手</string>
+    <string name="accessibility_service_description">开启后，点击知程全局悬浮窗即可在不离开微信/QQ/浏览器的情况下，直接读取当前屏幕通知文字或一键静默截屏提取日程。</string>
+</resources>
