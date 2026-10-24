@@ -1,11 +1,13 @@
 package com.anno2agenda.anno2agenda
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.graphics.Bitmap
 import android.os.Build
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
@@ -18,21 +20,30 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
 
         val isServiceEnabled: Boolean
             get() = instance != null
-
-        private val ignoredUiWords = setOf(
-            "返回", "发送", "更多", "语音", "表情", "拍摄", "相册", "视频通话",
-            "文件", "转账", "红包", "位置", "收藏", "名片", "微信", "通讯录",
-            "发现", "我", "消息", "联系人", "动态", "按住 说话"
-        )
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // 动态加固无障碍服务配置标志，确保与 TalkBack 同级别访问 IM 内部自定义消息视图与虚拟节点树
+        try {
+            val info = serviceInfo ?: AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType =
+                AccessibilityServiceInfo.FEEDBACK_SPOKEN or AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.flags = info.flags or
+                    AccessibilityServiceInfo.DEFAULT or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY
+            info.notificationTimeout = 80
+            serviceInfo = info
+        } catch (_: Exception) {}
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 仅在用户主动点击悬浮窗「读屏提取」或「截屏OCR」时按需读取，平时 0 性能消耗、不后台窃取隐私
+        // 仅在用户主动点击悬浮窗「读当前屏幕」或「截屏OCR」时按需读取，平时 0 性能消耗、不后台窃取隐私
     }
 
     override fun onInterrupt() {}
@@ -45,12 +56,29 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 方案 A：免截屏、免 OCR，毫秒级直接读取当前屏幕应用（如微信/QQ/浏览器）控件树上的文本气泡
+     * 方案 A：免截屏、免 OCR，直接深度遍历当前屏幕应用（如微信/QQ/飞书/钉钉/浏览器）完整无障碍节点树
+     * 不做任何关键词黑名单、长度截断或正则过滤，保留完整原始上下文交由端侧 LLM 理解
      */
     fun extractCurrentScreenText(): String {
         val collected = LinkedHashSet<String>()
 
-        // 优先遍历所有活动窗口，跳过本应用悬浮窗与系统状态栏
+        // 1. 先检查当前焦点活动窗口 rootInActiveWindow（确保底层主聊天窗口优先被完整遍历）
+        val activeRoot = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        }
+        if (activeRoot != null) {
+            val activePkg = activeRoot.packageName?.toString() ?: ""
+            if (activePkg != packageName) {
+                try {
+                    activeRoot.refresh()
+                } catch (_: Exception) {}
+                traverseNode(activeRoot, collected, 0)
+            }
+        }
+
+        // 2. 同时遍历所有多层窗口（优先应用层窗口，其次系统层/悬浮通知窗口，仅跳过本应用自身窗口）
         val winList = try {
             windows
         } catch (_: Exception) {
@@ -58,54 +86,80 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
         }
 
         if (!winList.isNullOrEmpty()) {
-            for (win in winList) {
-                val root = win.root ?: continue
+            val sortedWindows = winList.sortedBy { win ->
+                when (win.type) {
+                    AccessibilityWindowInfo.TYPE_APPLICATION -> 0
+                    AccessibilityWindowInfo.TYPE_INPUT_METHOD -> 2
+                    else -> 1
+                }
+            }
+            for (win in sortedWindows) {
+                val root = try {
+                    win.root
+                } catch (_: Exception) {
+                    null
+                } ?: continue
                 val pkg = root.packageName?.toString() ?: ""
-                if (pkg == packageName || pkg == "com.android.systemui") {
+                if (pkg == packageName) {
                     continue
                 }
-                traverseNode(root, collected)
+                try {
+                    root.refresh()
+                } catch (_: Exception) {}
+                traverseNode(root, collected, 0)
             }
         }
 
-        // 若多窗口列表为空，回退读取 rootInActiveWindow
-        if (collected.isEmpty()) {
-            val activeRoot = try {
-                rootInActiveWindow
+        return collected.joinToString("\n")
+    }
+
+    /**
+     * 深度优先遍历全部子节点（对齐 TalkBack 读屏行为）：
+     * - 不因父容器 isVisibleToUser == false 而剪枝（IM 聊天列表容器/自绘 View 常返回 false，但其子节点包含聊天文本）
+     * - 同时收集 text、contentDescription 与 hintText，不使用 else-if 互斥丢弃，也不做字数/词表过滤
+     */
+    private fun traverseNode(
+        node: AccessibilityNodeInfo?,
+        out: MutableSet<String>,
+        depth: Int
+    ) {
+        if (node == null || depth > 80) return
+
+        val text = try {
+            node.text?.toString()?.trim()
+        } catch (_: Exception) {
+            null
+        }
+        val desc = try {
+            node.contentDescription?.toString()?.trim()
+        } catch (_: Exception) {
+            null
+        }
+        val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                node.hintText?.toString()?.trim()
             } catch (_: Exception) {
                 null
             }
-            if (activeRoot != null && activeRoot.packageName?.toString() != packageName) {
-                traverseNode(activeRoot, collected)
-            }
-        }
-
-        // 优先筛选出像通知/消息的文本段落（长度 >= 6 或包含数字/时间词）
-        val meaningful = collected.filter { line ->
-            line.length >= 6 || Regex("""(\d+[月日点时:：]|明天|后天|周[一二三四五六日天]|会议|地点|教室|楼|截止)""").containsMatchIn(line)
-        }
-
-        return if (meaningful.isNotEmpty()) {
-            meaningful.joinToString("\n")
         } else {
-            collected.joinToString("\n")
+            null
         }
-    }
 
-    private fun traverseNode(node: AccessibilityNodeInfo?, out: MutableSet<String>) {
-        if (node == null) return
-        if (!node.isVisibleToUser) return
-
-        val text = node.text?.toString()?.trim()
-        val desc = node.contentDescription?.toString()?.trim()
-
-        if (!text.isNullOrEmpty() && text.length >= 2 && text !in ignoredUiWords) {
+        if (!text.isNullOrEmpty()) {
             out.add(text)
-        } else if (!desc.isNullOrEmpty() && desc.length >= 6 && desc !in ignoredUiWords) {
+        }
+        if (!desc.isNullOrEmpty() && desc != text) {
             out.add(desc)
         }
+        if (!hint.isNullOrEmpty() && hint != text && hint != desc) {
+            out.add(hint)
+        }
 
-        val count = node.childCount
+        val count = try {
+            node.childCount
+        } catch (_: Exception) {
+            0
+        }
         for (i in 0 until count) {
             val child = try {
                 node.getChild(i)
@@ -113,7 +167,7 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
                 null
             }
             if (child != null) {
-                traverseNode(child, out)
+                traverseNode(child, out, depth + 1)
             }
         }
     }

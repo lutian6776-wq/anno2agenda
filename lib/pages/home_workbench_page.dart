@@ -9,6 +9,7 @@ import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/platform_bridge.dart';
+import '../services/theme_manager.dart';
 import '../widgets/engine_status_badge.dart';
 import '../widgets/floating_status_badge.dart';
 import '../widgets/model_center_dialog.dart';
@@ -34,7 +35,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   AIEngineMode _engineMode = AIEngineMode.hybridAuto;
   bool _isExtracting = false;
-  bool _floatingRunning = false;
 
   /// 解析引擎状态指示器（红 / 黄 / 绿）
   EngineIndicatorState _engineIndicator = EngineIndicatorState.stopped;
@@ -104,11 +104,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     );
 
     await FloatingOverlayService.instance.init();
-    final floating = FloatingOverlayService.instance.isRunning;
     if (mounted) {
       setState(() {
         _localIps = ips;
-        _floatingRunning = floating;
       });
     }
 
@@ -139,8 +137,11 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           _lastEngineInfo = '$engineUsed · 悬浮窗原地提取';
         });
       },
+      onOverlayExtract: (text, sourceType) =>
+          _runExtractionFromOverlay(text, sourceType),
     );
 
+    await ThemeManager.instance.init();
     await _refreshLocalModelState();
   }
 
@@ -197,6 +198,8 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       if (_selectedModelName == null && models.isNotEmpty) {
         _selectedModelName = models.first;
       }
+      AIExtractorService.currentPreferredModel = _selectedModelName;
+      AIExtractorService.currentEngineMode = _engineMode;
 
       // 仅在非保留战报且非提取中时，更新待机引擎描述，绝不在未载入时显示“大模型就绪”
       if (!preserveLastEngineInfo && !_isExtracting) {
@@ -375,6 +378,124 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     }
   }
 
+  /// 供原生悬浮窗直接拉起主程序 LLM 提取管线（与主界面 100% 共享模型配置、进度流与结果状态）
+  Future<ExtractionResult> _runExtractionFromOverlay(
+    String rawText,
+    String sourceType,
+  ) async {
+    final raw = rawText.trim();
+    if (mounted) {
+      setState(() {
+        _inputController.text = raw;
+      });
+    }
+
+    _extractStopwatch = Stopwatch()..start();
+    _stopwatchTicker?.cancel();
+    _stopwatchTicker = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (mounted && _isExtracting) {
+        setState(() {
+          _elapsedSeconds =
+              (_extractStopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+        });
+      }
+    });
+
+    final willUseLlm = _engineMode != AIEngineMode.builtInRuleEngine;
+    final isAlreadyLoaded = await LocalModelManager.isModelLoadedInRam();
+
+    if (mounted) {
+      setState(() {
+        _isExtracting = true;
+        _processLogs.clear();
+        _streamedTokenBuffer.clear();
+        _tokenCount = 0;
+        _elapsedSeconds = 0.0;
+
+        if (willUseLlm) {
+          if (isAlreadyLoaded) {
+            _engineIndicator = EngineIndicatorState.ready;
+            _engineIndicatorDetail =
+                '端侧模型活跃推理中 (${LocalModelManager.currentlyLoadedModelId ?? _selectedModelName ?? "本地模型"})...';
+          } else {
+            _engineIndicator = EngineIndicatorState.starting;
+            _engineIndicatorDetail = '正在唤起/载入端侧大模型权重...';
+          }
+          _lastEngineInfo = '⏳ 悬浮窗正在唤起端侧大模型并生成日程...';
+        } else {
+          _engineIndicator = EngineIndicatorState.ready;
+          _engineIndicatorDetail = '纯端侧极速时空规则引擎 (0延迟就绪)';
+          _lastEngineInfo = '⚡ 纯端侧极速时空规则引擎正在解析...';
+        }
+      });
+    }
+
+    try {
+      String endpoint = _llmEndpointController.text.trim();
+      final peerIp = _peerIpController.text.trim();
+      if (Platform.isAndroid &&
+          peerIp.isNotEmpty &&
+          _activeLocalModels.isEmpty) {
+        endpoint = 'http://$peerIp:${LanSyncService.defaultPort}/extract';
+      }
+      AIExtractorService.currentLlmEndpoint = endpoint;
+
+      final result = await AIExtractorService.extractFromText(
+        rawText: raw,
+        sourceType: sourceType,
+        mode: _engineMode,
+        llmEndpoint: endpoint,
+        llmModelName: _selectedModelName,
+        thinkMode: LocalModelManager.enableThinkMode,
+        onProgress: ({stepLog, token, tokenCount}) {
+          if (tokenCount != null && tokenCount % 6 == 1) {
+            PlatformBridge.sendOverlayProgress(
+              '🧠 端侧大模型推理中 (已生成 $tokenCount tokens)...',
+            );
+          } else if (stepLog != null) {
+            PlatformBridge.sendOverlayProgress('⏳ $stepLog');
+          }
+
+          if (!mounted) return;
+          setState(() {
+            if (stepLog != null) {
+              final now = DateTime.now();
+              final timeStr =
+                  '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}.${(now.millisecond ~/ 100)}';
+              _processLogs.add('[$timeStr] $stepLog');
+            }
+            if (token != null) {
+              _streamedTokenBuffer.write(token);
+              if (tokenCount != null) {
+                _tokenCount = tokenCount;
+              }
+              if (_engineIndicator != EngineIndicatorState.ready) {
+                _engineIndicator = EngineIndicatorState.ready;
+                _engineIndicatorDetail =
+                    '大模型推理中 (${_selectedModelName ?? "本地大模型"})';
+              }
+            }
+          });
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _draftEvents.clear();
+          _draftEvents.addAll(result.events);
+          _lastEngineInfo =
+              '${result.engineUsed} · 悬浮窗原地提取 (${result.elapsedMs}ms)';
+        });
+      }
+      await _refreshLocalModelState(preserveLastEngineInfo: true);
+      return result;
+    } finally {
+      _stopwatchTicker?.cancel();
+      _extractStopwatch?.stop();
+      if (mounted) setState(() => _isExtracting = false);
+    }
+  }
+
   Future<void> _confirmDraftEvent(AgendaEvent event) async {
     try {
       final res = await AgendaWriteService.instance.writeEvent(
@@ -442,12 +563,19 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final isCompact = width < 760;
+    return PopScope(
+      canPop: !Platform.isAndroid,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && Platform.isAndroid) {
+          PlatformBridge.moveTaskToBack();
+        }
+      },
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final isCompact = width < 760;
 
-        return Scaffold(
+          return Scaffold(
           appBar: AppBar(
             titleSpacing: 12,
             title: Row(
@@ -579,8 +707,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
                   ],
                 )
               : null,
-        );
-      },
+          );
+        },
+      ),
     );
   }
 

@@ -1,13 +1,20 @@
 package com.anno2agenda.anno2agenda.floating
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
 
 /**
  * Android 原生灵动悬浮窗后台服务 (Floating Bubble Service)
@@ -20,7 +27,22 @@ class FloatingBubbleService : Service() {
 
     companion object {
         var isRunning: Boolean = false
+        var instance: FloatingBubbleService? = null
+            private set
+
         const val EXTRA_FLOATING_TEXT = "extra_floating_text"
+        private const val PREFS_NAME = "anno2agenda_prefs"
+        private const val KEY_THEME_MODE = "theme_mode"
+        private const val NOTIF_CHANNEL_ID = "anno2agenda_floating_channel"
+        private const val NOTIF_ID = 10086
+
+        fun updateThemeMode(context: Context, mode: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_THEME_MODE, mode)
+                .apply()
+            instance?.refreshTheme()
+        }
     }
 
     private var windowController: FloatingWindowController? = null
@@ -38,6 +60,8 @@ class FloatingBubbleService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        instance = this
+        startForegroundSafely()
 
         val bView = FloatingBubbleView(this)
         val pView = FloatingPanelView(this)
@@ -49,41 +73,78 @@ class FloatingBubbleService : Service() {
         windowController = controller
         captureCoordinator = coordinator
 
-        setupBubbleInteractions(bView, pView, controller, coordinator)
+        refreshTheme()
+        setupBubbleInteractions(bView, pView, controller)
         setupPanelInteractions(pView, controller, coordinator)
 
+        FloatingAiGateway.onProgressUpdate = { statusMsg ->
+            mainHandler.post {
+                if (isExtracting) {
+                    panelView?.setStatusText(statusMsg)
+                }
+            }
+        }
+
         FloatingAiGateway.notifyFloatingWindowState(true)
+    }
+
+    private fun startForegroundSafely() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                val channel = NotificationChannel(
+                    NOTIF_CHANNEL_ID,
+                    "知程灵动悬浮窗服务",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "保持端侧 AI 模型与灵动识屏悬浮窗后台活跃"
+                    setShowBadge(false)
+                }
+                nm?.createNotificationChannel(channel)
+            }
+            val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+                .setContentTitle("知程灵动悬浮窗运行中")
+                .setContentText("支持跨应用原地识屏与端侧 AI 提取日程")
+                .setSmallIcon(android.R.drawable.ic_menu_my_calendar)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+                .build()
+            startForeground(NOTIF_ID, notif)
+        } catch (_: Exception) {}
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        refreshTheme(newConfig)
+    }
+
+    fun refreshTheme(configOverride: Configuration? = null) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val mode = prefs.getString(KEY_THEME_MODE, "system") ?: "system"
+        val cfg = configOverride ?: resources.configuration
+        val isDark = when (mode) {
+            "dark" -> true
+            "light" -> false
+            else -> (cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        }
+        mainHandler.post {
+            bubbleView?.applyTheme(isDark)
+            panelView?.applyTheme(isDark)
+        }
     }
 
     private fun setupBubbleInteractions(
         bubble: FloatingBubbleView,
         panel: FloatingPanelView,
-        controller: FloatingWindowController,
-        coordinator: FloatingCaptureCoordinator
+        controller: FloatingWindowController
     ) {
         bubble.onPillClicked = {
+            refreshTheme()
             controller.expandPanel()
-            // 展开面板后，异步检查端侧大模型是否常驻，并同步状态至界面
+            // 仅展开面板并同步端侧大模型状态，不再自动读取或粘贴剪贴板/屏幕文字
             FloatingAiGateway.checkModelStatus { isLoaded, isLoading, _ ->
                 mainHandler.post {
                     panel.setWarmupState(isLoaded, isLoading)
-                }
-            }
-
-            // 优先自动执行无感识别：屏幕文字 -> 剪贴板文字
-            if (!isExtracting) {
-                coordinator.captureCurrentScreen { res ->
-                    if (res.success && res.text.isNotBlank()) {
-                        panel.setInputText(res.text)
-                        triggerAiExtraction(panel, res.text, res.sourceType)
-                    } else {
-                        coordinator.captureClipboard(silentIfEmpty = true) { clipRes ->
-                            if (clipRes.success && clipRes.text.isNotBlank()) {
-                                panel.setInputText(clipRes.text)
-                                triggerAiExtraction(panel, clipRes.text, clipRes.sourceType)
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -114,29 +175,36 @@ class FloatingBubbleService : Service() {
             if (isExtracting) {
                 panel.setStatusText("⏳ 正在提取日程，请稍候...")
             } else {
-                panel.setStatusText("👁️ 正在通过无障碍控件树直接读取屏幕通知...")
-                coordinator.captureCurrentScreen { res ->
-                    if (res.success) {
-                        panel.setInputText(res.text)
-                        triggerAiExtraction(panel, res.text, res.sourceType)
-                    } else {
-                        panel.setStatusText("⚠️ ${res.errorMessage ?: "读取屏幕失败"}")
-                        if (res.errorMessage?.contains("无障碍") == true) {
-                            Toast.makeText(
-                                this,
-                                "请先在系统设置中启用「知程 AI 识屏与静默截屏助手」",
-                                Toast.LENGTH_LONG
-                            ).show()
-                            controller.collapseToPill()
-                            try {
-                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                startActivity(intent)
-                            } catch (_: Exception) {}
+                panel.setStatusText("👁️ 正在通过无障碍节点树深度读取当前屏幕文本...")
+                coordinator.captureCurrentScreen(
+                    onBeforeCapture = {
+                        // 临时隐藏悬浮面板 100ms，让出焦点使底层微信/QQ对话恢复为活动窗口且无遮挡
+                        controller.hideTemporarilyForScreenshot(100) {}
+                    },
+                    onAfterCapture = {},
+                    onResult = { res ->
+                        if (res.success) {
+                            panel.setInputText(res.text)
+                            triggerAiExtraction(panel, res.text, res.sourceType)
+                        } else {
+                            panel.setStatusText("⚠️ ${res.errorMessage ?: "读取屏幕失败"}")
+                            if (res.errorMessage?.contains("无障碍") == true) {
+                                Toast.makeText(
+                                    this,
+                                    "请先在系统设置中启用「知程 AI 识屏与静默截屏助手」",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                controller.collapseToPill()
+                                try {
+                                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(intent)
+                                } catch (_: Exception) {}
+                            }
                         }
                     }
-                }
+                )
             }
         }
 
@@ -259,13 +327,36 @@ class FloatingBubbleService : Service() {
         }
         isExtracting = true
         panel.setExtracting(true)
-        panel.setStatusText("🧠 正在调用端侧 AI 引擎提取结构化日程...")
+        panel.setStatusText("🧠 正在唤起主程序端侧大模型提取结构化日程...")
+
+        var wakeLock: PowerManager.WakeLock? = null
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            wakeLock = pm?.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Anno2Agenda:FloatingAiWakeLock"
+            )?.apply {
+                acquire(180_000L)
+            }
+        } catch (_: Exception) {}
 
         FloatingAiGateway.extractAgenda(rawText, sourceType) { events, engineInfo ->
+            try {
+                if (wakeLock?.isHeld == true) {
+                    wakeLock.release()
+                }
+            } catch (_: Exception) {}
+
             mainHandler.post {
                 isExtracting = false
                 panel.setExtracting(false)
                 panel.setExtractedEvents(events, engineInfo)
+                // 提取完成后刷新模型常驻状态徽章
+                FloatingAiGateway.checkModelStatus { isLoaded, isLoading, _ ->
+                    mainHandler.post {
+                        panel.setWarmupState(isLoaded, isLoading)
+                    }
+                }
             }
         }
     }
@@ -273,6 +364,10 @@ class FloatingBubbleService : Service() {
     override fun onDestroy() {
         isRunning = false
         isExtracting = false
+        if (instance === this) {
+            instance = null
+        }
+        FloatingAiGateway.onProgressUpdate = null
         FloatingAiGateway.notifyFloatingWindowState(false)
         windowController?.destroy()
         windowController = null

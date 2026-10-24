@@ -22,6 +22,11 @@ object FloatingAiGateway {
     private var activeChannel: MethodChannel? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 接收来自主程序端侧大模型推理过程的实时状态/Token流回调
+     */
+    var onProgressUpdate: ((String) -> Unit)? = null
+
     fun registerChannel(channel: MethodChannel?) {
         activeChannel = channel
     }
@@ -38,13 +43,13 @@ object FloatingAiGateway {
     /**
      * 发起日程实体抽取请求
      *
-     * 优先通过 MethodChannel 请求 Flutter 后台 AI 引擎，若引擎未就绪、调用出错或超时，
-     * 自动无缝切换到内置的高校中文通知原生规则引擎。
+     * 优先通过 MethodChannel 请求 Flutter 后台 AI 引擎（支持冷启动加载权重 + 完整推理），
+     * 若引擎未就绪、调用出错或超时，自动无缝切换到内置的高校中文通知原生规则引擎。
      */
     fun extractAgenda(
         rawText: String,
         sourceType: String,
-        timeoutMs: Long = 60000L,
+        timeoutMs: Long = 180000L,
         onResult: (List<FloatingOverlayEvent>, String) -> Unit
     ) {
         val channel = activeChannel

@@ -149,6 +149,18 @@ class LocalModelManager {
   /// 预热并提前常驻加载大模型（消除首次提取时的冷启动等待）
   static Future<bool> preloadModel({String? preferredModelId}) async {
     if (_isModelLoading) return false;
+
+    while (_activeInferenceLock != null) {
+      try {
+        await _activeInferenceLock!.future.timeout(const Duration(seconds: 60));
+      } catch (_) {
+        _activeInferenceLock = null;
+        break;
+      }
+    }
+
+    final currentLock = Completer<void>();
+    _activeInferenceLock = currentLock;
     _isModelLoading = true;
     onModelStatusChanged?.call('⏳ 正在加载模型权重至内存/GPU...');
 
@@ -156,7 +168,6 @@ class LocalModelManager {
       if (Platform.isAndroid) {
         final ggufFile = await findLocalGgufFile(preferredModelId);
         if (ggufFile == null || !ggufFile.existsSync()) {
-          _isModelLoading = false;
           onModelStatusChanged?.call('⚠️ 未检测到本地模型文件，请先下载');
           return false;
         }
@@ -187,8 +198,8 @@ class LocalModelManager {
           _loadedAndroidModelPath = ggufFile.path;
         }
 
-        _currentlyLoadedModelId = preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
-        _isModelLoading = false;
+        _currentlyLoadedModelId =
+            preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
         markActivity();
         onModelStatusChanged?.call('🟢 端侧模型预热完成，已就绪');
         return true;
@@ -202,7 +213,8 @@ class LocalModelManager {
         try {
           final uri = Uri.parse('http://127.0.0.1:11434/api/generate');
           final req = await client.postUrl(uri);
-          req.headers.contentType = ContentType('application', 'json', charset: 'utf-8');
+          req.headers.contentType =
+              ContentType('application', 'json', charset: 'utf-8');
           req.add(utf8.encode(jsonEncode({
             'model': target,
             'prompt': 'hi',
@@ -216,17 +228,22 @@ class LocalModelManager {
         }
 
         _currentlyLoadedModelId = target;
-        _isModelLoading = false;
         markActivity();
         onModelStatusChanged?.call('🟢 本地模型服务已预热就绪 ($target)');
         return true;
       }
     } catch (e) {
-      _isModelLoading = false;
       onModelStatusChanged?.call('⚠️ 预热失败: $e');
       return false;
+    } finally {
+      _isModelLoading = false;
+      if (_activeInferenceLock == currentLock) {
+        _activeInferenceLock = null;
+      }
+      if (!currentLock.isCompleted) {
+        currentLock.complete();
+      }
     }
-    _isModelLoading = false;
     return false;
   }
 
@@ -385,7 +402,7 @@ class LocalModelManager {
     // 串行互斥排队：防止并发调用导致底层 JNI 静态全局指针竞争与 Use-After-Free 崩溃
     while (_activeInferenceLock != null) {
       try {
-        await _activeInferenceLock!.future.timeout(const Duration(seconds: 40));
+        await _activeInferenceLock!.future.timeout(const Duration(seconds: 90));
       } catch (_) {
         _activeInferenceLock = null;
         break;
@@ -403,29 +420,33 @@ class LocalModelManager {
       final alreadyLoaded = await controller.isModelLoaded();
       if (!alreadyLoaded || _loadedAndroidModelPath != ggufFile.path) {
         _isModelLoading = true;
-        if (alreadyLoaded) {
-          await controller.dispose();
-          _androidLlamaController = LlamaController();
-        }
-        int gpuLayers = 0;
         try {
-          final gpu = await _androidLlamaController!.detectGpu();
-          if (gpu.vulkanSupported && gpu.recommendedGpuLayers > 0) {
-            gpuLayers = gpu.recommendedGpuLayers;
+          if (alreadyLoaded) {
+            await controller.dispose();
+            _androidLlamaController = LlamaController();
           }
-        } catch (_) {}
+          int gpuLayers = 0;
+          try {
+            final gpu = await _androidLlamaController!.detectGpu();
+            if (gpu.vulkanSupported && gpu.recommendedGpuLayers > 0) {
+              gpuLayers = gpu.recommendedGpuLayers;
+            }
+          } catch (_) {}
 
-        await _androidLlamaController!.loadModel(
-          modelPath: ggufFile.path,
-          threads: 6,
-          contextSize: 4096,
-          gpuLayers: gpuLayers,
-        );
-        _loadedAndroidModelPath = ggufFile.path;
-        _isModelLoading = false;
+          await _androidLlamaController!.loadModel(
+            modelPath: ggufFile.path,
+            threads: 6,
+            contextSize: 4096,
+            gpuLayers: gpuLayers,
+          );
+          _loadedAndroidModelPath = ggufFile.path;
+        } finally {
+          _isModelLoading = false;
+        }
       }
 
-      _currentlyLoadedModelId = preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
+      _currentlyLoadedModelId =
+          preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
       markActivity();
 
       if (_androidLlamaController!.isGenerating) {
@@ -463,7 +484,7 @@ class LocalModelManager {
             '<think>\n\n</think>\n'
             '$jsonPrefill';
         buffer = StringBuffer(jsonPrefill);
-        maxTokensToGen = 384;
+        maxTokensToGen = 512;
         onToken?.call(jsonPrefill);
       } else {
         // 深度思考模式：允许输出思维链推理过程，然后输出合法 JSON
@@ -494,6 +515,9 @@ class LocalModelManager {
           final current = buffer.toString();
           if (current.contains('<|im_end|>') || current.contains('<|endoftext|>')) {
             _androidLlamaController?.stop();
+            if (!completer.isCompleted) {
+              completer.complete(current);
+            }
           }
         },
         onDone: () {
@@ -509,8 +533,8 @@ class LocalModelManager {
       );
 
       try {
-        final rawOut =
-            await completer.future.timeout(Duration(seconds: isThink ? 70 : 35));
+        final rawOut = await completer.future
+            .timeout(Duration(seconds: isThink ? 180 : 120));
         await sub.cancel();
         markActivity();
         return _cleanModelJsonOutput(rawOut);
@@ -519,6 +543,10 @@ class LocalModelManager {
         try {
           await _androidLlamaController?.stop();
         } catch (_) {}
+        final partial = buffer.toString().trim();
+        if (partial.length > 15) {
+          return _cleanModelJsonOutput(partial);
+        }
         return null;
       }
     } finally {
@@ -531,7 +559,7 @@ class LocalModelManager {
     }
   }
 
-  /// 清理端侧模型生成文本中的特殊结束符并截取合法 JSON
+  /// 清理端侧模型生成文本中的特殊结束符并修补预填充 JSON 结构
   static String _cleanModelJsonOutput(String raw) {
     var cleaned = raw
         .replaceAll('<|im_end|>', '')
@@ -539,11 +567,35 @@ class LocalModelManager {
         .replaceAll('```json', '')
         .replaceAll('```', '')
         .trim();
+
+    // 移除深度思考块 <think>...</think>
+    final thinkEnd = cleaned.indexOf('</think>');
+    if (thinkEnd != -1) {
+      cleaned = cleaned.substring(thinkEnd + '</think>'.length).trim();
+    }
+
+    // 若因预填充 '{"events":[' 导致模型重复输出了 '{"events":['，剔除重复前缀
+    final dupPrefix = RegExp(r'^\{\s*"events"\s*:\s*\[\s*\{\s*"events"\s*:\s*\[');
+    if (dupPrefix.hasMatch(cleaned)) {
+      cleaned = cleaned.replaceFirst(RegExp(r'^\{\s*"events"\s*:\s*\[\s*'), '');
+    }
+
     final startObj = cleaned.indexOf('{');
     final endObj = cleaned.lastIndexOf('}');
     if (startObj != -1 && endObj > startObj) {
-      return cleaned.substring(startObj, endObj + 1);
+      cleaned = cleaned.substring(startObj, endObj + 1);
     }
+
+    // 若以 '{"events":[' 开头但结尾仅闭合了内部对象 '}' 而未闭合 ']}'，自动补齐
+    final trimmed = cleaned.trim();
+    if (trimmed.startsWith('{"events":[') && !trimmed.endsWith(']}')) {
+      if (trimmed.endsWith(']')) {
+        cleaned = '$trimmed}';
+      } else if (trimmed.endsWith('}')) {
+        cleaned = '$trimmed]}';
+      }
+    }
+
     return cleaned;
   }
 

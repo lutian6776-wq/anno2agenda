@@ -5,7 +5,6 @@ import '../models/agenda_event.dart';
 import '../repositories/agenda_repository.dart';
 import '../services/agenda_write_service.dart';
 import '../services/chinese_calendar_helper.dart';
-import '../services/platform_bridge.dart';
 import '../widgets/agenda_empty_state.dart';
 import '../widgets/agenda_event_card.dart';
 import '../widgets/agenda_filter_bar.dart';

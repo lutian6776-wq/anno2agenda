@@ -34,26 +34,26 @@ class PlatformBridge {
   static void Function(IncomingCapturePayload payload)? onExternalCapture;
   static void Function(List<AgendaEvent> events, String engineUsed)?
       onOverlayExtractedEvents;
+  static Future<ExtractionResult> Function(String text, String sourceType)?
+      onOverlayExtractRequest;
 
   /// 初始化原生平台通道监听（Android 划词、分享、悬浮窗原地 AI 提取回调、悬浮窗写入同步与模型目录获取）
   static Future<void> initialize({
     required void Function(IncomingCapturePayload payload) onCaptureReceived,
     void Function(List<AgendaEvent> events, String engineUsed)?
         onOverlayExtracted,
+    Future<ExtractionResult> Function(String text, String sourceType)?
+        onOverlayExtract,
   }) async {
     onExternalCapture = onCaptureReceived;
     onOverlayExtractedEvents = onOverlayExtracted;
+    onOverlayExtractRequest = onOverlayExtract;
     FloatingOverlayService.instance.onOverlayExtractedEvents =
         onOverlayExtracted;
 
     if (!Platform.isAndroid) return;
 
-    try {
-      final dirPath = await _channel.invokeMethod<String>('getModelsDir');
-      if (dirPath != null && dirPath.isNotEmpty) {
-        LocalModelManager.setAndroidModelsDir(dirPath);
-      }
-    } catch (_) {}
+    await ensureModelsDir();
 
     try {
       final storageDir = await getAppStorageDir();
@@ -74,7 +74,7 @@ class PlatformBridge {
         }
         return null;
       } else if (call.method == 'extractAgendaForOverlay') {
-        // 悬浮窗原地识屏/截屏 OCR/剪贴板提取：在后台调用 Flutter AI 引擎并传回完整 AgendaEvent 结构
+        // 悬浮窗原地识屏/截屏 OCR/剪贴板/手动解析：直接拉起主程序 AI 提取管线并回传结构化结果
         final map = Map<String, dynamic>.from(call.arguments as Map);
         final text = map['text']?.toString() ?? '';
         final source = map['sourceType']?.toString() ?? 'floating';
@@ -84,15 +84,31 @@ class PlatformBridge {
             'events': <Map<String, dynamic>>[],
           };
         }
-        final res = await AIExtractorService.extractFromText(
-          rawText: text.trim(),
-          sourceType: source,
-          mode: AIExtractorService.currentEngineMode,
-          llmModelName: AIExtractorService.currentPreferredModel,
-          thinkMode: LocalModelManager.enableThinkMode,
-        );
 
-        onOverlayExtractedEvents?.call(res.events, res.engineUsed);
+        await ensureModelsDir();
+
+        final ExtractionResult res;
+        if (onOverlayExtractRequest != null) {
+          res = await onOverlayExtractRequest!(text.trim(), source);
+        } else {
+          res = await AIExtractorService.extractFromText(
+            rawText: text.trim(),
+            sourceType: source,
+            mode: AIExtractorService.currentEngineMode,
+            llmEndpoint: AIExtractorService.currentLlmEndpoint,
+            llmModelName: AIExtractorService.currentPreferredModel,
+            thinkMode: LocalModelManager.enableThinkMode,
+            onProgress: ({stepLog, token, tokenCount}) {
+              if (tokenCount != null && tokenCount % 8 == 1) {
+                sendOverlayProgress('🧠 端侧大模型生成中 (已输出 $tokenCount tokens)...');
+              } else if (stepLog != null) {
+                sendOverlayProgress('⏳ $stepLog');
+              }
+            },
+          );
+          onOverlayExtractedEvents?.call(res.events, res.engineUsed);
+        }
+
         FloatingOverlayService.instance
             .dispatchOverlayExtractedEvents(res.events, res.engineUsed);
 
@@ -260,5 +276,45 @@ class PlatformBridge {
     } catch (_) {
       return null;
     }
+  }
+
+  /// 确保 Android 模型目录路径已注入 LocalModelManager
+  static Future<String?> ensureModelsDir() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final dirPath = await _channel.invokeMethod<String>('getModelsDir');
+      if (dirPath != null && dirPath.isNotEmpty) {
+        LocalModelManager.setAndroidModelsDir(dirPath);
+        return dirPath;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// 将当前应用的深浅色主题同步给 Android 原生灵动悬浮窗
+  static Future<void> syncThemeMode(String mode) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('setThemeMode', {'mode': mode});
+    } catch (_) {}
+  }
+
+  /// 将主程序端侧大模型推理进度实时推送给悬浮窗状态栏
+  static Future<void> sendOverlayProgress(String status) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>(
+        'onOverlayExtractionProgress',
+        {'status': status},
+      );
+    } catch (_) {}
+  }
+
+  /// 将 Android 主活动退至后台而不销毁引擎
+  static Future<void> moveTaskToBack() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('moveTaskToBack');
+    } catch (_) {}
   }
 }

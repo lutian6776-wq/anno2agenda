@@ -41,6 +41,9 @@ class AIExtractorService {
   /// 全局共享的当前偏好模型 ID（如 qwen3.5:2b）
   static String? currentPreferredModel;
 
+  /// 全局共享的当前推理接口地址（供悬浮窗后台调用对齐主程序配置）
+  static String currentLlmEndpoint = 'http://127.0.0.1:11434/api/generate';
+
   static const List<String> _weekdays = [
     '星期一',
     '星期二',
@@ -309,7 +312,7 @@ class AIExtractorService {
     }
   }
 
-  /// 将大模型输出的 JSON 字符串解析为 AgendaEvent 列表（兼容数组与对象结构）
+  /// 将大模型输出的 JSON 字符串解析为 AgendaEvent 列表（兼容数组、对象与截断修复，绝不因局部格式异常向上抛出导致误触发规则引擎）
   static List<AgendaEvent> _parseEventsFromRawJsonString({
     required String rawJson,
     required String rawText,
@@ -317,17 +320,30 @@ class AIExtractorService {
     required String deviceOrigin,
   }) {
     final trimmed = rawJson.trim();
+    if (trimmed.isEmpty) return [];
+
     dynamic parsedJson;
-    try {
-      parsedJson = jsonDecode(trimmed);
-    } catch (_) {
-      final startObj = trimmed.indexOf('{');
-      final endObj = trimmed.lastIndexOf('}');
-      if (startObj != -1 && endObj > startObj) {
-        parsedJson = jsonDecode(trimmed.substring(startObj, endObj + 1));
-      } else {
-        return [];
+    final candidates = <String>[
+      trimmed,
+      if (trimmed.startsWith('{"events":[') && !trimmed.endsWith(']}'))
+        trimmed.endsWith(']') ? '$trimmed}' : '$trimmed]}',
+    ];
+
+    final startObj = trimmed.indexOf('{');
+    final endObj = trimmed.lastIndexOf('}');
+    if (startObj != -1 && endObj > startObj) {
+      final sub = trimmed.substring(startObj, endObj + 1);
+      candidates.add(sub);
+      if (sub.startsWith('{"events":[') && !sub.endsWith(']}')) {
+        candidates.add('$sub]}');
       }
+    }
+
+    for (final candidate in candidates) {
+      try {
+        parsedJson = jsonDecode(candidate);
+        if (parsedJson != null) break;
+      } catch (_) {}
     }
 
     List<dynamic> rawList = [];
@@ -341,13 +357,80 @@ class AIExtractorService {
       }
     }
 
-    return rawList.map((item) {
-      final map = Map<String, dynamic>.from(item as Map);
-      map['sourceText'] = rawText;
-      map['sourceType'] = sourceType;
-      map['deviceOrigin'] = deviceOrigin;
-      return AgendaEvent.fromJson(map);
-    }).toList();
+    // 若外层 JSON 因提示词原因夹杂了额外解释文本或未闭合数组，逐个扫描提取内层包含 "title" 的独立事件 JSON 对象
+    if (rawList.isEmpty) {
+      rawList = _extractBalancedEventObjects(trimmed);
+    }
+
+    final events = <AgendaEvent>[];
+    for (final item in rawList) {
+      if (item is! Map) continue;
+      try {
+        final map = Map<String, dynamic>.from(item);
+        map['sourceText'] = rawText;
+        map['sourceType'] = sourceType;
+        map['deviceOrigin'] = deviceOrigin;
+        events.add(AgendaEvent.fromJson(map));
+      } catch (_) {}
+    }
+    return events;
+  }
+
+  /// 从非标准或混杂文本的模型输出中提取独立的 `{...}` 事件对象
+  static List<Map<String, dynamic>> _extractBalancedEventObjects(String text) {
+    final results = <Map<String, dynamic>>[];
+    int depth = 0;
+    int objStart = -1;
+    bool inString = false;
+    bool escaped = false;
+
+    for (int i = 0; i < text.length; i++) {
+      final ch = text[i];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch == '\\' && inString) {
+        escaped = true;
+        continue;
+      }
+      if (ch == '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+
+      if (ch == '{') {
+        if (depth == 0) {
+          objStart = i;
+        } else if (depth == 1 &&
+            objStart != -1 &&
+            text.substring(objStart, i).contains('"events"')) {
+          // 进入了 {"events": [ 内部的具体事件对象
+          objStart = i;
+          depth = 0;
+        }
+        depth++;
+      } else if (ch == '}') {
+        if (depth > 0) {
+          depth--;
+          if (depth == 0 && objStart != -1) {
+            final slice = text.substring(objStart, i + 1);
+            if (slice.contains('"title"')) {
+              try {
+                final decoded = jsonDecode(slice);
+                if (decoded is Map<String, dynamic> &&
+                    decoded.containsKey('title')) {
+                  results.add(decoded);
+                }
+              } catch (_) {}
+            }
+            objStart = -1;
+          }
+        }
+      }
+    }
+    return results;
   }
 
   /// 内置高校通知多节点时空启发式解析器（支持一段通知拆出多个日程节点）

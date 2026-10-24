@@ -35,14 +35,31 @@ class FloatingBubbleView(context: Context) : AppCompatTextView(context) {
         setPadding(padH, padV, padH, padV)
         elevation = dp(8).toFloat()
 
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(24).toFloat()
-            setColor(Color.parseColor("#2563EB"))
-            setStroke(dp(2), Color.parseColor("#93C5FD"))
-        }
-
+        applyTheme(isDark = false)
         setupTouchListener()
+    }
+
+    /**
+     * 跟随主应用深浅色主题切换更新胶囊外观
+     */
+    fun applyTheme(isDark: Boolean) {
+        if (isDark) {
+            setTextColor(Color.parseColor("#F8FAFC"))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.parseColor("#1E40AF"))
+                setStroke(dp(2), Color.parseColor("#60A5FA"))
+            }
+        } else {
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.parseColor("#2563EB"))
+                setStroke(dp(2), Color.parseColor("#93C5FD"))
+            }
+        }
     }
 
     private fun dp(value: Int): Int {

@@ -37,6 +37,10 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
     var onWriteAllClicked: ((List<FloatingOverlayEvent>) -> Unit)? = null
     var onOpenPermissionSettingsClicked: (() -> Unit)? = null
 
+    private val titleView: TextView
+    private val closeBtn: TextView
+    private val permText: TextView
+    private val openPermBtn: TextView
     private val inputEditText: EditText
     private val statusTextView: TextView
     private val eventsListLayout: LinearLayout
@@ -49,6 +53,10 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
     private val reAnalyzeBtn: TextView
 
     private var currentEvents: List<FloatingOverlayEvent> = emptyList()
+    private var currentEngineInfo: String = ""
+    private var isDarkTheme: Boolean = false
+    private var lastWarmupLoaded: Boolean = false
+    private var lastWarmupLoading: Boolean = false
 
     init {
         orientation = VERTICAL
@@ -73,14 +81,14 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val titleView = TextView(context).apply {
+        titleView = TextView(context).apply {
             text = "✨ 知程灵动采集（零跳转原地解析）"
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.parseColor("#0F172A"))
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
         }
-        val closeBtn = TextView(context).apply {
+        closeBtn = TextView(context).apply {
             text = "收起 ✕"
             textSize = 12f
             setTextColor(Color.parseColor("#475569"))
@@ -130,11 +138,11 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
             gravity = Gravity.CENTER_VERTICAL
         }
         inputEditText = EditText(context).apply {
-            hint = "点「读当前屏幕」抓取微信通知，也可直接粘贴修改..."
+            hint = "点「读当前屏幕」抓取微信/QQ对话，也可直接粘贴修改..."
             textSize = 12.5f
             setTextColor(Color.parseColor("#1E293B"))
             setHintTextColor(Color.parseColor("#94A3B8"))
-            maxLines = 3
+            maxLines = 4
             setPadding(dp(10), dp(8), dp(10), dp(8))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
@@ -146,9 +154,7 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
         }
         reAnalyzeBtn = createChipButton("AI 解析", "#2563EB", "#FFFFFF") {
             val text = inputEditText.text?.toString()?.trim() ?: ""
-            if (text.isNotEmpty()) {
-                onReAnalyzeClicked?.invoke(text)
-            }
+            onReAnalyzeClicked?.invoke(text)
         }
         inputRow.addView(inputEditText)
         inputRow.addView(createSpace(dp(6)))
@@ -157,7 +163,7 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
 
         // 4. 状态提示文本
         statusTextView = TextView(context).apply {
-            text = "⚡ 就绪：点「读当前屏幕」免复制抓取通知"
+            text = "⚡ 就绪：点「读当前屏幕」免复制抓取会话，或粘贴后点「AI 解析」"
             textSize = 11f
             setTextColor(Color.parseColor("#64748B"))
             setPadding(0, dp(6), 0, dp(6))
@@ -165,6 +171,20 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
         addView(statusTextView)
 
         // 4.1 权限引导提示横幅（权限缺失时展现）
+        permText = TextView(context).apply {
+            text = "⚠️ 未获日历权限，点击打开应用授权"
+            textSize = 11.5f
+            setTextColor(Color.parseColor("#B91C1C"))
+            typeface = Typeface.DEFAULT_BOLD
+            layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+        }
+        openPermBtn = TextView(context).apply {
+            text = "去授权 →"
+            textSize = 11.5f
+            setTextColor(Color.parseColor("#2563EB"))
+            setPadding(dp(8), dp(2), dp(4), dp(2))
+            setOnClickListener { onOpenPermissionSettingsClicked?.invoke() }
+        }
         permissionPromptLayout = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -176,22 +196,8 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
                 setColor(Color.parseColor("#FEF2F2"))
                 setStroke(dp(1), Color.parseColor("#FECACA"))
             }
-            val permText = TextView(context).apply {
-                text = "⚠️ 未获日历权限，点击打开应用授权"
-                textSize = 11.5f
-                setTextColor(Color.parseColor("#B91C1C"))
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val openBtn = TextView(context).apply {
-                text = "去授权 →"
-                textSize = 11.5f
-                setTextColor(Color.parseColor("#2563EB"))
-                setPadding(dp(8), dp(2), dp(4), dp(2))
-                setOnClickListener { onOpenPermissionSettingsClicked?.invoke() }
-            }
             addView(permText)
-            addView(openBtn)
+            addView(openPermBtn)
         }
         addView(permissionPromptLayout)
 
@@ -263,6 +269,76 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
 
     // ================= 公开状态更新方法 =================
 
+    /**
+     * 跟随主应用深浅色主题动态切换悬浮面板配色
+     */
+    fun applyTheme(isDark: Boolean) {
+        isDarkTheme = isDark
+        val panelBg = if (isDark) "#0F172A" else "#F8FAFC"
+        val panelStroke = if (isDark) "#334155" else "#CBD5E1"
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(20).toFloat()
+            setColor(Color.parseColor(panelBg))
+            setStroke(dp(1), Color.parseColor(panelStroke))
+        }
+
+        titleView.setTextColor(Color.parseColor(if (isDark) "#F8FAFC" else "#0F172A"))
+        closeBtn.setTextColor(Color.parseColor(if (isDark) "#94A3B8" else "#475569"))
+
+        updateChipColors(
+            btnReadScreen,
+            if (isDark) "#1E3A8A" else "#DBEAFE",
+            if (isDark) "#93C5FD" else "#1D4ED8"
+        )
+        updateChipColors(
+            btnScreenshotOcr,
+            if (isDark) "#312E81" else "#E0E7FF",
+            if (isDark) "#A5B4FC" else "#4338CA"
+        )
+        updateChipColors(
+            btnReadClip,
+            if (isDark) "#14532D" else "#DCFCE7",
+            if (isDark) "#86EFAC" else "#15803D"
+        )
+        updateChipColors(
+            reAnalyzeBtn,
+            if (isDark) "#3B82F6" else "#2563EB",
+            "#FFFFFF"
+        )
+
+        inputEditText.setTextColor(Color.parseColor(if (isDark) "#F8FAFC" else "#1E293B"))
+        inputEditText.setHintTextColor(Color.parseColor(if (isDark) "#64748B" else "#94A3B8"))
+        inputEditText.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(Color.parseColor(if (isDark) "#1E293B" else "#FFFFFF"))
+            setStroke(dp(1), Color.parseColor(if (isDark) "#334155" else "#E2E8F0"))
+        }
+
+        statusTextView.setTextColor(Color.parseColor(if (isDark) "#94A3B8" else "#64748B"))
+
+        permissionPromptLayout.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(10).toFloat()
+            setColor(Color.parseColor(if (isDark) "#450A0A" else "#FEF2F2"))
+            setStroke(dp(1), Color.parseColor(if (isDark) "#7F1D1D" else "#FECACA"))
+        }
+        permText.setTextColor(Color.parseColor(if (isDark) "#FCA5A5" else "#B91C1C"))
+        openPermBtn.setTextColor(Color.parseColor(if (isDark) "#60A5FA" else "#2563EB"))
+
+        // 重新应用模型预热按钮与卡片列表的主题配色
+        setWarmupState(lastWarmupLoaded, lastWarmupLoading, null)
+        if (currentEvents.isNotEmpty()) {
+            setExtractedEvents(currentEvents, currentEngineInfo)
+        }
+    }
+
+    private fun updateChipColors(chip: TextView, bgHex: String, textHex: String) {
+        chip.setTextColor(Color.parseColor(textHex))
+        (chip.background as? GradientDrawable)?.setColor(Color.parseColor(bgHex))
+    }
+
     fun setStatusText(text: String) {
         statusTextView.text = text
     }
@@ -298,26 +374,35 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
     }
 
     fun setWarmupState(isLoaded: Boolean, isLoading: Boolean, message: String? = null) {
+        lastWarmupLoaded = isLoaded
+        lastWarmupLoading = isLoading
         if (isLoading) {
             modelWarmupBtn.text = "⏳ 预热中..."
-            modelWarmupBtn.setTextColor(Color.parseColor("#B45309"))
-            (modelWarmupBtn.background as? GradientDrawable)?.setColor(Color.parseColor("#FEF3C7"))
+            modelWarmupBtn.setTextColor(Color.parseColor(if (isDarkTheme) "#FCD34D" else "#B45309"))
+            (modelWarmupBtn.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (isDarkTheme) "#78350F" else "#FEF3C7")
+            )
             if (message != null) statusTextView.text = message
         } else if (isLoaded) {
             modelWarmupBtn.text = "🟢 模型已就绪"
-            modelWarmupBtn.setTextColor(Color.parseColor("#15803D"))
-            (modelWarmupBtn.background as? GradientDrawable)?.setColor(Color.parseColor("#DCFCE7"))
+            modelWarmupBtn.setTextColor(Color.parseColor(if (isDarkTheme) "#86EFAC" else "#15803D"))
+            (modelWarmupBtn.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (isDarkTheme) "#14532D" else "#DCFCE7")
+            )
             if (message != null) statusTextView.text = message
         } else {
             modelWarmupBtn.text = "⚡ 预热模型"
-            modelWarmupBtn.setTextColor(Color.parseColor("#92400E"))
-            (modelWarmupBtn.background as? GradientDrawable)?.setColor(Color.parseColor("#FEF3C7"))
+            modelWarmupBtn.setTextColor(Color.parseColor(if (isDarkTheme) "#FCD34D" else "#92400E"))
+            (modelWarmupBtn.background as? GradientDrawable)?.setColor(
+                Color.parseColor(if (isDarkTheme) "#78350F" else "#FEF3C7")
+            )
             if (message != null) statusTextView.text = message
         }
     }
 
     fun setExtractedEvents(events: List<FloatingOverlayEvent>, engineInfo: String) {
         currentEvents = events
+        currentEngineInfo = engineInfo
         eventsListLayout.removeAllViews()
 
         val fmt = SimpleDateFormat("MM月dd日 HH:mm", Locale.CHINA)
@@ -333,8 +418,8 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = dp(10).toFloat()
-                    setColor(Color.WHITE)
-                    setStroke(dp(1), Color.parseColor("#CBD5E1"))
+                    setColor(Color.parseColor(if (isDarkTheme) "#1E293B" else "#FFFFFF"))
+                    setStroke(dp(1), Color.parseColor(if (isDarkTheme) "#334155" else "#CBD5E1"))
                 }
                 layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                     bottomMargin = dp(6)
@@ -345,14 +430,14 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
                 text = "📌 $title"
                 textSize = 13f
                 typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.parseColor("#0F172A"))
+                setTextColor(Color.parseColor(if (isDarkTheme) "#F8FAFC" else "#0F172A"))
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             }
             val subTv = TextView(context).apply {
                 text = "🕒 $timeStr   📍 $location"
                 textSize = 11.5f
-                setTextColor(Color.parseColor("#475569"))
+                setTextColor(Color.parseColor(if (isDarkTheme) "#94A3B8" else "#475569"))
             }
 
             itemCard.addView(titleTv)
@@ -362,7 +447,7 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
                 val clTv = TextView(context).apply {
                     text = "📋 待办：${ev.checklist.joinToString("、")}"
                     textSize = 10.5f
-                    setTextColor(Color.parseColor("#2563EB"))
+                    setTextColor(Color.parseColor(if (isDarkTheme) "#60A5FA" else "#2563EB"))
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                 }

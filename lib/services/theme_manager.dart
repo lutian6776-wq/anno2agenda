@@ -1,7 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'platform_bridge.dart';
 
-/// 全局主题管理器（支持浅色、深色、跟随系统，并持久化到本地）
+/// 全局主题管理器（支持浅色、深色、跟随系统，并持久化到本地及同步至原生悬浮窗）
 class ThemeManager {
   static final ThemeManager _instance = ThemeManager._internal();
   factory ThemeManager() => _instance;
@@ -19,12 +20,29 @@ class ThemeManager {
 
   File? _settingsFile;
 
+  String get modeString => switch (_themeMode) {
+        ThemeMode.dark => 'dark',
+        ThemeMode.light => 'light',
+        ThemeMode.system => 'system',
+      };
+
+  Future<File> _resolveSettingsFile() async {
+    if (_settingsFile != null) return _settingsFile!;
+    String baseDir = Directory.current.path;
+    if (Platform.isAndroid) {
+      final storageDir = await PlatformBridge.getAppStorageDir();
+      if (storageDir != null && storageDir.isNotEmpty) {
+        baseDir = storageDir;
+      }
+    }
+    _settingsFile = File('$baseDir${Platform.pathSeparator}theme_mode.txt');
+    return _settingsFile!;
+  }
+
   /// 初始化并从本地读取上次保存的主题偏好
   Future<void> init() async {
     try {
-      final baseDir = Directory.current.path;
-      final file = File('$baseDir/theme_mode.txt');
-      _settingsFile = file;
+      final file = await _resolveSettingsFile();
 
       if (await file.exists()) {
         final content = (await file.readAsString()).trim();
@@ -37,24 +55,26 @@ class ThemeManager {
         }
         themeModeNotifier.value = _themeMode;
       }
+      await PlatformBridge.syncThemeMode(modeString);
     } catch (e) {
       debugPrint('[ThemeManager] 加载本地主题配置异常: $e');
     }
   }
 
-  /// 切换主题模式并持久化
+  /// 切换主题模式并持久化（同时实时同步给 Android 原生悬浮窗）
   Future<void> setThemeMode(ThemeMode mode) async {
-    if (_themeMode == mode) return;
+    if (_themeMode == mode) {
+      await PlatformBridge.syncThemeMode(modeString);
+      return;
+    }
     _themeMode = mode;
     themeModeNotifier.value = mode;
 
+    final modeStr = modeString;
+    await PlatformBridge.syncThemeMode(modeStr);
+
     try {
-      final file = _settingsFile ?? File('${Directory.current.path}/theme_mode.txt');
-      final modeStr = switch (mode) {
-        ThemeMode.dark => 'dark',
-        ThemeMode.light => 'light',
-        ThemeMode.system => 'system',
-      };
+      final file = await _resolveSettingsFile();
       await file.writeAsString(modeStr);
     } catch (e) {
       debugPrint('[ThemeManager] 保存主题配置异常: $e');

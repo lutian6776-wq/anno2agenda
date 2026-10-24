@@ -5,7 +5,6 @@ import '../services/ai_extractor_service.dart';
 import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
-import '../services/platform_bridge.dart';
 import '../services/theme_manager.dart';
 
 /// 「设置」页面（大模型常驻、Android 原生无障碍悬浮窗、局域网协同与关于）

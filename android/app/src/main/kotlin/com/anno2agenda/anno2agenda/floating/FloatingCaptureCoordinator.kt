@@ -19,8 +19,15 @@ class FloatingCaptureCoordinator(private val context: Context) {
 
     /**
      * 采集源 1：通过无障碍服务直接读取当前屏幕应用文字
+     *
+     * @param onBeforeCapture 读屏前钩子（可临时隐藏悬浮面板以让出焦点，使底层微信/QQ会话成为活动窗口）
+     * @param onAfterCapture 读屏完成钩子（恢复悬浮面板展现）
      */
-    fun captureCurrentScreen(onResult: (FloatingCaptureResult) -> Unit) {
+    fun captureCurrentScreen(
+        onBeforeCapture: (() -> Unit)? = null,
+        onAfterCapture: (() -> Unit)? = null,
+        onResult: (FloatingCaptureResult) -> Unit
+    ) {
         val a11y = ScreenCaptureAccessibilityService.instance
         if (a11y == null) {
             onResult(
@@ -34,26 +41,60 @@ class FloatingCaptureCoordinator(private val context: Context) {
             return
         }
 
-        val text = a11y.extractCurrentScreenText().trim()
-        if (text.isEmpty()) {
+        if (onBeforeCapture != null) {
+            onBeforeCapture.invoke()
+            mainHandler.postDelayed({
+                val text = try {
+                    a11y.extractCurrentScreenText().trim()
+                } catch (_: Exception) {
+                    ""
+                }
+                onAfterCapture?.invoke()
+                if (text.isEmpty()) {
+                    onResult(
+                        FloatingCaptureResult(
+                            text = "",
+                            sourceType = "screen_a11y",
+                            success = false,
+                            errorMessage = "当前屏幕未探测到文字内容，若是海报或图片通知请点击「🖼️ 截屏 OCR」"
+                        )
+                    )
+                } else {
+                    onResult(
+                        FloatingCaptureResult(
+                            text = text,
+                            sourceType = "screen_a11y",
+                            success = true
+                        )
+                    )
+                }
+            }, 100)
+        } else {
+            val text = try {
+                a11y.extractCurrentScreenText().trim()
+            } catch (_: Exception) {
+                ""
+            }
+            if (text.isEmpty()) {
+                onResult(
+                    FloatingCaptureResult(
+                        text = "",
+                        sourceType = "screen_a11y",
+                        success = false,
+                        errorMessage = "当前屏幕未探测到文字内容，若是海报或图片通知请点击「🖼️ 截屏 OCR」"
+                    )
+                )
+                return
+            }
+
             onResult(
                 FloatingCaptureResult(
-                    text = "",
+                    text = text,
                     sourceType = "screen_a11y",
-                    success = false,
-                    errorMessage = "当前屏幕未探测到文字内容，若是海报或图片通知请点击「🖼️ 截屏 OCR」"
+                    success = true
                 )
             )
-            return
         }
-
-        onResult(
-            FloatingCaptureResult(
-                text = text,
-                sourceType = "screen_a11y",
-                success = true
-            )
-        )
     }
 
     /**

@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.window.OnBackInvokedDispatcher
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.anno2agenda.anno2agenda.floating.FloatingAiGateway
@@ -58,6 +59,20 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         extractTextFromIntent(intent, isInitial = true)
+
+        // Android 13+ 预测性返回手势拦截：切后台而非销毁 Activity，保证端侧大模型与 FlutterEngine 常驻后台可被悬浮窗随时拉起
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) {
+                moveTaskToBack(true)
+            }
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        moveTaskToBack(true)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -81,6 +96,24 @@ class MainActivity : FlutterActivity() {
                 }
                 "getAppStorageDir" -> {
                     result.success(filesDir.absolutePath)
+                }
+                "setThemeMode" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val mode = args?.get("mode")?.toString() ?: "system"
+                    FloatingBubbleService.updateThemeMode(this, mode)
+                    result.success(true)
+                }
+                "onOverlayExtractionProgress" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val status = args?.get("status")?.toString()
+                    if (!status.isNullOrBlank()) {
+                        FloatingAiGateway.onProgressUpdate?.invoke(status)
+                    }
+                    result.success(true)
+                }
+                "moveTaskToBack" -> {
+                    moveTaskToBack(true)
+                    result.success(true)
                 }
                 "insertCalendarEvent" -> {
                     val args = call.arguments as? Map<*, *>
