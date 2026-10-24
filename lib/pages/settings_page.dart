@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../repositories/agenda_repository.dart';
 import '../services/ai_extractor_service.dart';
+import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/platform_bridge.dart';
@@ -47,12 +48,27 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _checkNativeState();
+    FloatingOverlayService.instance.isRunningNotifier.addListener(_onFloatingRunningChanged);
+  }
+
+  @override
+  void dispose() {
+    FloatingOverlayService.instance.isRunningNotifier.removeListener(_onFloatingRunningChanged);
+    super.dispose();
+  }
+
+  void _onFloatingRunningChanged() {
+    if (mounted) {
+      setState(() {
+        _floatingRunning = FloatingOverlayService.instance.isRunning;
+      });
+    }
   }
 
   Future<void> _checkNativeState() async {
     if (!Platform.isAndroid) return;
-    final flt = await PlatformBridge.isFloatingWindowRunning();
-    final a11y = await PlatformBridge.isAccessibilityEnabled();
+    final flt = await FloatingOverlayService.instance.checkRunningState();
+    final a11y = await FloatingOverlayService.instance.checkAccessibilityState();
     if (mounted) {
       setState(() {
         _floatingRunning = flt;
@@ -885,7 +901,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 FilledButton.icon(
                   onPressed: () async {
                     final res =
-                        await PlatformBridge.toggleAndroidFloatingWindow(
+                        await FloatingOverlayService.instance.toggleFloatingWindow(
                             !_floatingRunning);
                     await _checkNativeState();
                     if (res['message'] != null) {
@@ -899,7 +915,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 FilledButton.tonalIcon(
                   onPressed: () async {
-                    await PlatformBridge.openAccessibilitySettings();
+                    await FloatingOverlayService.instance.openAccessibilitySettings();
                     _showSnack('请在系统无障碍设置中找到「知程 AI 识屏与静默截屏助手」并开启');
                   },
                   icon: Icon(

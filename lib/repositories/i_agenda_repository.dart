@@ -14,13 +14,16 @@ abstract class IAgendaRepository {
   List<AgendaEvent> get allEvents;
   ValueListenable<List<AgendaEvent>> get eventsNotifier;
 
-  Future<void> init();
+  Future<void> init({String? storageDir});
+  Future<void> reload();
+  AgendaEvent? getEventById(String id);
+  AgendaEvent? findDuplicate(AgendaEvent event);
   Future<void> addEvent(AgendaEvent event);
   Future<void> addEvents(List<AgendaEvent> events);
   Future<void> removeEvent(String id);
   Future<void> clearAll();
   Future<void> updateEvent(AgendaEvent event);
-  Future<void> markAsSynced(String id);
+  Future<void> markAsSynced(String id, {String? systemCalendarEventId});
   Future<List<AgendaEvent>> mergeRemoteEvents(List<AgendaEvent> remote);
 
   List<AgendaEvent> filter({

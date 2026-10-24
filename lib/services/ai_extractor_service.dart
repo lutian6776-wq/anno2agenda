@@ -35,6 +35,12 @@ typedef ExtractionProgressCallback = void Function({
 });
 
 class AIExtractorService {
+  /// 全局共享的当前引擎模式（由设置或工作台界面动态切换）
+  static AIEngineMode currentEngineMode = AIEngineMode.hybridAuto;
+
+  /// 全局共享的当前偏好模型 ID（如 qwen3.5:2b）
+  static String? currentPreferredModel;
+
   static const List<String> _weekdays = [
     '星期一',
     '星期二',

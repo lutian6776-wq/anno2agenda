@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/agenda_event.dart';
 import '../repositories/agenda_repository.dart';
+import '../services/agenda_write_service.dart';
 import '../services/chinese_calendar_helper.dart';
 import '../services/platform_bridge.dart';
 import '../widgets/agenda_empty_state.dart';
@@ -79,9 +80,15 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
 
   Future<void> _writeToCalendar(AgendaEvent event) async {
     try {
-      final msg = await PlatformBridge.writeEventToSystemCalendar(event);
-      await _repo.markAsSynced(event.id);
-      _showSnack('✅ $msg');
+      final res = await AgendaWriteService.instance.writeEvent(
+        event,
+        writeToSystemCalendar: true,
+      );
+      if (res.success) {
+        _showSnack('✅ ${res.message}');
+      } else {
+        _showSnack('⚠️ ${res.message}');
+      }
     } catch (e) {
       _showSnack('⚠️ 写入系统日历失败: $e');
     }

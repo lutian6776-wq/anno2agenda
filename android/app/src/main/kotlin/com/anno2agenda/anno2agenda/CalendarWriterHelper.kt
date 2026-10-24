@@ -25,7 +25,8 @@ object CalendarWriterHelper {
         if (!hasCalendarPermission(context)) {
             return mapOf(
                 "success" to false,
-                "message" to "尚未授予日历权限，请先在知程主界面允许日历访问权限"
+                "message" to "尚未授予日历权限，请先在知程主界面或系统设置中允许日历访问权限",
+                "permissionDenied" to true
             )
         }
 
@@ -41,6 +42,18 @@ object CalendarWriterHelper {
             val endMillis =
                 (args["endMillis"] as? Number)?.toLong() ?: (startMillis + 3600_000L)
             val reminderMinutes = (args["reminderMinutes"] as? Number)?.toInt() ?: 30
+
+            // 写入前检查是否已存在相同标题与开始时间的日程，实现底层日历去重
+            val existingEventId = findExistingCalendarEventId(context, title, startMillis)
+            if (existingEventId != null) {
+                return mapOf(
+                    "success" to true,
+                    "message" to "日历中已存在相同日程（事件ID: $existingEventId），已自动跳过重复写入",
+                    "eventId" to existingEventId.toString(),
+                    "systemCalendarEventId" to existingEventId.toString(),
+                    "alreadyExists" to true
+                )
+            }
 
             val values = ContentValues().apply {
                 put(CalendarContract.Events.DTSTART, startMillis)
@@ -72,12 +85,44 @@ object CalendarWriterHelper {
                 )
             }
 
-            mapOf(
+            val resMap = mutableMapOf<String, Any>(
                 "success" to true,
                 "message" to "已静默写入系统日历（事件ID: ${eventId ?: "OK"}，提前 ${reminderMinutes} 分钟提醒）"
             )
+            if (eventId != null) {
+                resMap["eventId"] = eventId.toString()
+                resMap["systemCalendarEventId"] = eventId.toString()
+            }
+            resMap
         } catch (e: Exception) {
             mapOf("success" to false, "message" to "写入异常: ${e.message}")
+        }
+    }
+
+    /**
+     * 在系统日历中查找是否已存在相同标题与开始时间的日程（精确去重）
+     */
+    fun findExistingCalendarEventId(context: Context, title: String, startMillis: Long): Long? {
+        if (!hasCalendarPermission(context)) return null
+        val projection = arrayOf(
+            CalendarContract.Events._ID,
+            CalendarContract.Events.TITLE,
+            CalendarContract.Events.DTSTART
+        )
+        val selection = "${CalendarContract.Events.TITLE} = ? AND ${CalendarContract.Events.DTSTART} = ?"
+        val selectionArgs = arrayOf(title, startMillis.toString())
+        return try {
+            context.contentResolver.query(
+                CalendarContract.Events.CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0) else null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

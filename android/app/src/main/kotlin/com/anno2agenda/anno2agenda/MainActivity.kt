@@ -11,6 +11,8 @@ import android.os.Looper
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.anno2agenda.anno2agenda.floating.FloatingAiGateway
+import com.anno2agenda.anno2agenda.floating.FloatingBubbleService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -20,126 +22,31 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "com.anno2agenda/native"
         private const val REQ_CALENDAR_PERM = 2001
 
-        @Volatile
-        private var activeChannel: MethodChannel? = null
-
         /**
-         * 供全局悬浮窗 (FloatingBubbleService) 在不跳转界面的情况下后台调用 Flutter AI 引擎提取日程
+         * 供外部通过 MainActivity 兼容调用 FloatingAiGateway 提取日程
          */
         fun extractAgendaForOverlay(
             rawText: String,
             sourceType: String,
             onResult: (List<Map<String, Any>>, String) -> Unit
         ) {
-            val channel = activeChannel
-            if (channel == null) {
-                onResult(emptyList(), "原生内置规则")
-                return
-            }
-            Handler(Looper.getMainLooper()).post {
-                try {
-                    channel.invokeMethod(
-                        "extractAgendaForOverlay",
-                        mapOf("text" to rawText, "sourceType" to sourceType),
-                        object : MethodChannel.Result {
-                            override fun success(result: Any?) {
-                                val resMap = result as? Map<*, *>
-                                val engineUsed = resMap?.get("engineUsed")?.toString() ?: "Flutter AI 引擎"
-                                val rawEvents = resMap?.get("events") as? List<*>
-                                val parsedList = mutableListOf<Map<String, Any>>()
-                                rawEvents?.forEach { item ->
-                                    val m = item as? Map<*, *> ?: return@forEach
-                                    val mapEntry = mutableMapOf<String, Any>()
-                                    m.forEach { (k, v) ->
-                                        if (k is String && v != null) {
-                                            mapEntry[k] = v
-                                        }
-                                    }
-                                    parsedList.add(mapEntry)
-                                }
-                                onResult(parsedList, engineUsed)
-                            }
-
-                            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                                onResult(emptyList(), "原生兜底 ($errorCode)")
-                            }
-
-                            override fun notImplemented() {
-                                onResult(emptyList(), "原生兜底")
-                            }
-                        }
-                    )
-                } catch (e: Exception) {
-                    onResult(emptyList(), "原生兜底")
-                }
+            FloatingAiGateway.extractAgenda(rawText, sourceType) { events, engineInfo ->
+                onResult(events.map { it.toMap() }, engineInfo)
             }
         }
 
         /**
-         * 供悬浮窗在有输入前手动或自动预热大模型
+         * 供外部兼容调用大模型预热
          */
         fun preloadModelForOverlay(onResult: (Boolean, String) -> Unit) {
-            val channel = activeChannel
-            if (channel == null) {
-                onResult(false, "应用后台服务待命中")
-                return
-            }
-            Handler(Looper.getMainLooper()).post {
-                try {
-                    channel.invokeMethod("preloadModelForOverlay", null, object : MethodChannel.Result {
-                        override fun success(result: Any?) {
-                            val map = result as? Map<*, *>
-                            val ok = map?.get("success") == true
-                            val msg = map?.get("message")?.toString() ?: if (ok) "已预热" else "预热失败"
-                            onResult(ok, msg)
-                        }
-
-                        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                            onResult(false, errorMessage ?: "预热错误")
-                        }
-
-                        override fun notImplemented() {
-                            onResult(false, "未实现")
-                        }
-                    })
-                } catch (e: Exception) {
-                    onResult(false, e.message ?: "异常")
-                }
-            }
+            FloatingAiGateway.preloadModel(onResult)
         }
 
         /**
-         * 查询模型是否已加载到内存
+         * 供外部兼容查询模型状态
          */
         fun checkModelStatusForOverlay(onResult: (Boolean, Boolean, String) -> Unit) {
-            val channel = activeChannel
-            if (channel == null) {
-                onResult(false, false, "")
-                return
-            }
-            Handler(Looper.getMainLooper()).post {
-                try {
-                    channel.invokeMethod("isModelReadyForOverlay", null, object : MethodChannel.Result {
-                        override fun success(result: Any?) {
-                            val map = result as? Map<*, *>
-                            val isLoaded = map?.get("isLoaded") == true
-                            val isLoading = map?.get("isLoading") == true
-                            val modelName = map?.get("modelName")?.toString() ?: ""
-                            onResult(isLoaded, isLoading, modelName)
-                        }
-
-                        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                            onResult(false, false, "")
-                        }
-
-                        override fun notImplemented() {
-                            onResult(false, false, "")
-                        }
-                    })
-                } catch (e: Exception) {
-                    onResult(false, false, "")
-                }
-            }
+            FloatingAiGateway.checkModelStatus(onResult)
         }
     }
 
@@ -163,7 +70,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         methodChannel = channel
-        activeChannel = channel
+        FloatingAiGateway.registerChannel(channel)
 
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -171,6 +78,9 @@ class MainActivity : FlutterActivity() {
                     val payload = pendingInitialCapture
                     pendingInitialCapture = null
                     result.success(payload)
+                }
+                "getAppStorageDir" -> {
+                    result.success(filesDir.absolutePath)
                 }
                 "insertCalendarEvent" -> {
                     val args = call.arguments as? Map<*, *>
@@ -269,9 +179,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        if (activeChannel == methodChannel) {
-            activeChannel = null
-        }
+        FloatingAiGateway.unregisterChannel(methodChannel)
         super.onDestroy()
     }
 

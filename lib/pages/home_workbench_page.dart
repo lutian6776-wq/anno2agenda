@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/agenda_event.dart';
 import '../repositories/agenda_repository.dart';
+import '../services/agenda_write_service.dart';
 import '../services/ai_extractor_service.dart';
+import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/platform_bridge.dart';
@@ -65,6 +67,8 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   @override
   void initState() {
     super.initState();
+    AIExtractorService.currentEngineMode = _engineMode;
+    AIExtractorService.currentPreferredModel = _selectedModelName;
     _inputController.text =
         AIExtractPage.sampleAnnouncements.first['text']!;
 
@@ -99,7 +103,8 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       },
     );
 
-    final floating = await PlatformBridge.isFloatingWindowRunning();
+    await FloatingOverlayService.instance.init();
+    final floating = FloatingOverlayService.instance.isRunning;
     if (mounted) {
       setState(() {
         _localIps = ips;
@@ -372,30 +377,39 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   Future<void> _confirmDraftEvent(AgendaEvent event) async {
     try {
-      final msg = await PlatformBridge.writeEventToSystemCalendar(event);
-      event.syncedToSystemCalendar = true;
-      await AgendaRepository.instance.addEvent(event);
-      setState(() {
-        _draftEvents.removeWhere((e) => e.id == event.id);
-      });
-      _showSnack('✅ $msg');
+      final res = await AgendaWriteService.instance.writeEvent(
+        event,
+        writeToSystemCalendar: true,
+      );
+      if (res.persisted) {
+        setState(() {
+          _draftEvents.removeWhere((e) => e.id == event.id);
+        });
+      }
+      if (res.success) {
+        _showSnack('✅ ${res.message}');
+      } else {
+        _showSnack('⚠️ ${res.message}');
+      }
     } catch (e) {
-      _showSnack('⚠️ 写入系统日历失败：$e');
+      _showSnack('⚠️ 写入日程失败：$e');
     }
   }
 
   Future<void> _confirmAllDrafts({bool writeSystemCalendar = true}) async {
     final copy = List<AgendaEvent>.from(_draftEvents);
-    for (final ev in copy) {
-      if (writeSystemCalendar) {
-        await _confirmDraftEvent(ev);
-      } else {
-        await AgendaRepository.instance.addEvent(ev);
+    final batchRes = await AgendaWriteService.instance.writeEvents(
+      copy,
+      writeToSystemCalendar: writeSystemCalendar,
+    );
+    for (final res in batchRes.results) {
+      if (res.persisted) {
         setState(() {
-          _draftEvents.removeWhere((e) => e.id == ev.id);
+          _draftEvents.removeWhere((e) => e.id == res.eventId);
         });
       }
     }
+    _showSnack(batchRes.summaryMessage);
   }
 
   void _showModelCenter() {
@@ -408,9 +422,11 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       activeDownload: _activeDownload,
       onRefreshState: _refreshLocalModelState,
       onSelectModel: (model) {
+        AIExtractorService.currentPreferredModel = model;
         setState(() => _selectedModelName = model);
       },
       onEngineModeChanged: (mode) {
+        AIExtractorService.currentEngineMode = mode;
         setState(() => _engineMode = mode);
       },
       onShowSnack: _showSnack,
@@ -464,19 +480,19 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
               ),
               const SizedBox(width: 6),
               if (Platform.isAndroid) ...[
-                FloatingStatusBadge(
-                  isRunning: _floatingRunning,
-                  onToggle: () async {
-                    final res =
-                        await PlatformBridge.toggleAndroidFloatingWindow(
-                            !_floatingRunning);
-                    setState(() {
-                      _floatingRunning = res['running'] == true;
-                    });
-                    if (res['message'] != null) {
-                      _showSnack(res['message'].toString());
-                    }
-                  },
+                ValueListenableBuilder<bool>(
+                  valueListenable:
+                      FloatingOverlayService.instance.isRunningNotifier,
+                  builder: (context, isRunning, _) => FloatingStatusBadge(
+                    isRunning: isRunning,
+                    onToggle: () async {
+                      final res = await FloatingOverlayService.instance
+                          .toggleFloatingWindow(!isRunning);
+                      if (res['message'] != null) {
+                        _showSnack(res['message'].toString());
+                      }
+                    },
+                  ),
                 ),
                 const SizedBox(width: 10),
               ] else ...[
@@ -602,6 +618,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         return SettingsPage(
           engineMode: _engineMode,
           onEngineModeChanged: (mode) {
+            AIExtractorService.currentEngineMode = mode;
             setState(() => _engineMode = mode);
             _refreshLocalModelState();
           },

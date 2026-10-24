@@ -25,9 +25,12 @@ class AgendaRepository implements IAgendaRepository {
 
   /// 初始化本地持久化仓储并加载历史日程
   @override
-  Future<void> init() async {
+  Future<void> init({String? storageDir}) async {
     try {
-      final baseDir = Directory.current.path;
+      String baseDir = storageDir ?? '';
+      if (baseDir.isEmpty) {
+        baseDir = Directory.current.path;
+      }
       final file = File('$baseDir/agenda_events.json');
       _storageFile = file;
 
@@ -44,6 +47,48 @@ class AgendaRepository implements IAgendaRepository {
     } catch (e) {
       debugPrint('[AgendaRepository] 加载本地日程失败: $e');
     }
+  }
+
+  /// 重新从本地存储文件读取最新日程（例如悬浮窗在后台写入后触发同步）
+  @override
+  Future<void> reload() async {
+    try {
+      final file = _storageFile;
+      if (file != null && await file.exists()) {
+        final content = await file.readAsString();
+        if (content.trim().isNotEmpty) {
+          final loaded = AgendaEvent.decodeList(content);
+          _events.clear();
+          _events.addAll(loaded);
+          _sortEvents();
+          _notify();
+        }
+      }
+    } catch (e) {
+      debugPrint('[AgendaRepository] 重新加载本地日程失败: $e');
+    }
+  }
+
+  /// 根据 ID 精确查找日程
+  @override
+  AgendaEvent? getEventById(String id) {
+    final idx = _events.indexWhere((e) => e.id == id);
+    return idx >= 0 ? _events[idx] : null;
+  }
+
+  /// 根据 ID 或核心三要素（标题、开始时间、地点）探测是否存在重复日程
+  @override
+  AgendaEvent? findDuplicate(AgendaEvent event) {
+    for (final e in _events) {
+      if (e.id == event.id) return e;
+      final sameTitle = e.title.trim() == event.title.trim();
+      final sameLocation = e.location.trim() == event.location.trim();
+      final diffSeconds = (e.startTime.difference(event.startTime).inSeconds).abs();
+      if (sameTitle && sameLocation && diffSeconds <= 60) {
+        return e;
+      }
+    }
+    return null;
   }
 
   /// 添加单个日程
@@ -106,10 +151,13 @@ class AgendaRepository implements IAgendaRepository {
 
   /// 标记日程为已写入系统日历
   @override
-  Future<void> markAsSynced(String id) async {
+  Future<void> markAsSynced(String id, {String? systemCalendarEventId}) async {
     final idx = _events.indexWhere((e) => e.id == id);
     if (idx >= 0) {
       _events[idx].syncedToSystemCalendar = true;
+      if (systemCalendarEventId != null && systemCalendarEventId.isNotEmpty) {
+        _events[idx].systemCalendarEventId = systemCalendarEventId;
+      }
       _notify();
       await _persist();
     }

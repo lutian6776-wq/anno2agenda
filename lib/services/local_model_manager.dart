@@ -181,7 +181,7 @@ class LocalModelManager {
           await _androidLlamaController!.loadModel(
             modelPath: ggufFile.path,
             threads: 6,
-            contextSize: 2048,
+            contextSize: 4096,
             gpuLayers: gpuLayers,
           );
           _loadedAndroidModelPath = ggufFile.path;
@@ -359,6 +359,9 @@ class LocalModelManager {
     return files.first;
   }
 
+  /// 串行互斥锁：防止并发调用导致底层 JNI 静态全局指针竞争与 Use-After-Free 崩溃
+  static Completer<void>? _activeInferenceLock;
+
   /// 在 Android 端使用内嵌的 llama.cpp (ARM64 NEON / Vulkan) 直接加载本地 GGUF 模型并执行推理
   static Future<String?> runAndroidNativeInference({
     required String systemPrompt,
@@ -372,119 +375,159 @@ class LocalModelManager {
     final ggufFile = await findLocalGgufFile(preferredModelId);
     if (ggufFile == null || !ggufFile.existsSync()) return null;
 
-    _androidLlamaController ??= LlamaController();
-    final controller = _androidLlamaController!;
-
-    // 若尚未加载模型或切换了不同模型，则先加载 GGUF 权重并常驻内存
-    final alreadyLoaded = await controller.isModelLoaded();
-    if (!alreadyLoaded || _loadedAndroidModelPath != ggufFile.path) {
-      _isModelLoading = true;
-      if (alreadyLoaded) {
-        await controller.dispose();
-        _androidLlamaController = LlamaController();
+    // 模型文件完整性保护（至少 10MB）
+    try {
+      if (ggufFile.lengthSync() < 10 * 1024 * 1024) {
+        return null;
       }
-      int gpuLayers = 0;
-      try {
-        final gpu = await _androidLlamaController!.detectGpu();
-        if (gpu.vulkanSupported && gpu.recommendedGpuLayers > 0) {
-          gpuLayers = gpu.recommendedGpuLayers;
-        }
-      } catch (_) {}
+    } catch (_) {}
 
-      await _androidLlamaController!.loadModel(
-        modelPath: ggufFile.path,
-        threads: 6,
-        contextSize: 2048,
-        gpuLayers: gpuLayers,
-      );
-      _loadedAndroidModelPath = ggufFile.path;
-      _isModelLoading = false;
-    } else {
+    // 串行互斥排队：防止并发调用导致底层 JNI 静态全局指针竞争与 Use-After-Free 崩溃
+    while (_activeInferenceLock != null) {
+      try {
+        await _activeInferenceLock!.future.timeout(const Duration(seconds: 40));
+      } catch (_) {
+        _activeInferenceLock = null;
+        break;
+      }
+    }
+
+    final currentLock = Completer<void>();
+    _activeInferenceLock = currentLock;
+
+    try {
+      _androidLlamaController ??= LlamaController();
+      final controller = _androidLlamaController!;
+
+      // 若尚未加载模型或切换了不同模型，则先加载 GGUF 权重并常驻内存
+      final alreadyLoaded = await controller.isModelLoaded();
+      if (!alreadyLoaded || _loadedAndroidModelPath != ggufFile.path) {
+        _isModelLoading = true;
+        if (alreadyLoaded) {
+          await controller.dispose();
+          _androidLlamaController = LlamaController();
+        }
+        int gpuLayers = 0;
+        try {
+          final gpu = await _androidLlamaController!.detectGpu();
+          if (gpu.vulkanSupported && gpu.recommendedGpuLayers > 0) {
+            gpuLayers = gpu.recommendedGpuLayers;
+          }
+        } catch (_) {}
+
+        await _androidLlamaController!.loadModel(
+          modelPath: ggufFile.path,
+          threads: 6,
+          contextSize: 4096,
+          gpuLayers: gpuLayers,
+        );
+        _loadedAndroidModelPath = ggufFile.path;
+        _isModelLoading = false;
+      }
+
+      _currentlyLoadedModelId = preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
+      markActivity();
+
+      if (_androidLlamaController!.isGenerating) {
+        await _androidLlamaController!.stop();
+      }
+
+      // 无论是否为首次加载，每次独立日程提取前均严格清空重置上下文与 KV Cache，
+      // 将底层的已处理位置 g_n_past 归零，彻底规避多次提取累计导致的窗口溢出与 GGML_ASSERT 崩溃
       try {
         await controller.clearContext();
       } catch (_) {}
-    }
 
-    _currentlyLoadedModelId = preferredModelId ?? ggufFile.path.split(Platform.pathSeparator).last;
-    markActivity();
+      // 对输入文本中的特殊标记进行安全清洗，防止用户文本中的特殊符号干扰分词器导致非法 Token 越界
+      final sanitizedUserPrompt = userPrompt
+          .replaceAll('<|im_start|>', '')
+          .replaceAll('<|im_end|>', '')
+          .replaceAll('<|endoftext|>', '')
+          .replaceAll('<think>', '')
+          .replaceAll('</think>', '')
+          .trim();
 
-    if (_androidLlamaController!.isGenerating) {
-      await _androidLlamaController!.stop();
-    }
+      final isThink = thinkMode ?? enableThinkMode;
+      final String fullPrompt;
+      final int maxTokensToGen;
+      final StringBuffer buffer;
 
-    final isThink = thinkMode ?? enableThinkMode;
-    final String fullPrompt;
-    final int maxTokensToGen;
-    final StringBuffer buffer;
+      if (!isThink) {
+        // 免思考极速模式：Qwen3.5 预填充绕过思维链，直接从 {"events":[ 开始输出 JSON
+        const jsonPrefill = '{"events":[';
+        fullPrompt = '<|im_start|>system\n'
+            '$systemPrompt<|im_end|>\n'
+            '<|im_start|>user\n'
+            '$sanitizedUserPrompt /no_think<|im_end|>\n'
+            '<|im_start|>assistant\n'
+            '<think>\n\n</think>\n'
+            '$jsonPrefill';
+        buffer = StringBuffer(jsonPrefill);
+        maxTokensToGen = 384;
+        onToken?.call(jsonPrefill);
+      } else {
+        // 深度思考模式：允许输出思维链推理过程，然后输出合法 JSON
+        fullPrompt = '<|im_start|>system\n'
+            '$systemPrompt<|im_end|>\n'
+            '<|im_start|>user\n'
+            '$sanitizedUserPrompt<|im_end|>\n'
+            '<|im_start|>assistant\n';
+        buffer = StringBuffer();
+        maxTokensToGen = 1024;
+      }
 
-    if (!isThink) {
-      // 免思考极速模式：Qwen3.5 预填充绕过思维链，直接从 {"events":[ 开始输出 JSON
-      const jsonPrefill = '{"events":[';
-      fullPrompt = '<|im_start|>system\n'
-          '$systemPrompt<|im_end|>\n'
-          '<|im_start|>user\n'
-          '$userPrompt /no_think<|im_end|>\n'
-          '<|im_start|>assistant\n'
-          '<think>\n\n</think>\n'
-          '$jsonPrefill';
-      buffer = StringBuffer(jsonPrefill);
-      maxTokensToGen = 384;
-      onToken?.call(jsonPrefill);
-    } else {
-      // 深度思考模式：允许输出思维链推理过程，然后输出合法 JSON
-      fullPrompt = '<|im_start|>system\n'
-          '$systemPrompt<|im_end|>\n'
-          '<|im_start|>user\n'
-          '$userPrompt<|im_end|>\n'
-          '<|im_start|>assistant\n';
-      buffer = StringBuffer();
-      maxTokensToGen = 1024;
-    }
+      final completer = Completer<String>();
+      StreamSubscription<String>? sub;
 
-    final completer = Completer<String>();
-    StreamSubscription<String>? sub;
+      sub = _androidLlamaController!
+          .generate(
+            prompt: fullPrompt,
+            maxTokens: maxTokensToGen,
+            temperature: 0.1,
+            topP: 0.85,
+            repeatPenalty: 1.05,
+          )
+          .listen(
+        (token) {
+          buffer.write(token);
+          onToken?.call(token);
+          final current = buffer.toString();
+          if (current.contains('<|im_end|>') || current.contains('<|endoftext|>')) {
+            _androidLlamaController?.stop();
+          }
+        },
+        onDone: () {
+          if (!completer.isCompleted) {
+            completer.complete(buffer.toString());
+          }
+        },
+        onError: (err) {
+          if (!completer.isCompleted) {
+            completer.completeError(err);
+          }
+        },
+      );
 
-    sub = _androidLlamaController!
-        .generate(
-          prompt: fullPrompt,
-          maxTokens: maxTokensToGen,
-          temperature: 0.1,
-          topP: 0.85,
-          repeatPenalty: 1.05,
-        )
-        .listen(
-      (token) {
-        buffer.write(token);
-        onToken?.call(token);
-        final current = buffer.toString();
-        if (current.contains('<|im_end|>') || current.contains('<|endoftext|>')) {
-          _androidLlamaController?.stop();
-        }
-      },
-      onDone: () {
-        if (!completer.isCompleted) {
-          completer.complete(buffer.toString());
-        }
-      },
-      onError: (err) {
-        if (!completer.isCompleted) {
-          completer.completeError(err);
-        }
-      },
-    );
-
-    try {
-      final rawOut =
-          await completer.future.timeout(Duration(seconds: isThink ? 70 : 35));
-      await sub.cancel();
-      markActivity();
-      return _cleanModelJsonOutput(rawOut);
-    } catch (_) {
-      await sub.cancel();
       try {
-        await _androidLlamaController?.stop();
-      } catch (_) {}
-      return null;
+        final rawOut =
+            await completer.future.timeout(Duration(seconds: isThink ? 70 : 35));
+        await sub.cancel();
+        markActivity();
+        return _cleanModelJsonOutput(rawOut);
+      } catch (_) {
+        await sub.cancel();
+        try {
+          await _androidLlamaController?.stop();
+        } catch (_) {}
+        return null;
+      }
+    } finally {
+      if (_activeInferenceLock == currentLock) {
+        _activeInferenceLock = null;
+      }
+      if (!currentLock.isCompleted) {
+        currentLock.complete();
+      }
     }
   }
 

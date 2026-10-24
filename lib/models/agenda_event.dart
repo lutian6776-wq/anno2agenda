@@ -14,6 +14,7 @@ class AgendaEvent {
   final double confidence;
   bool syncedToSystemCalendar;
   final String deviceOrigin; // 'android' or 'windows'
+  String? systemCalendarEventId;
 
   AgendaEvent({
     required this.id,
@@ -29,6 +30,7 @@ class AgendaEvent {
     this.confidence = 0.92,
     this.syncedToSystemCalendar = false,
     this.deviceOrigin = 'local',
+    this.systemCalendarEventId,
   }) : checklist = checklist ?? [];
 
   Map<String, dynamic> toJson() => {
@@ -45,13 +47,60 @@ class AgendaEvent {
         'confidence': confidence,
         'syncedToSystemCalendar': syncedToSystemCalendar,
         'deviceOrigin': deviceOrigin,
+        'systemCalendarEventId': systemCalendarEventId,
+      };
+
+  /// 转换为与 Android/原生 MethodChannel 通信的完整协议 Map
+  Map<String, dynamic> toChannelMap() => {
+        'id': id,
+        'title': title,
+        'startTime': startTime.toIso8601String(),
+        'startMillis': startTime.millisecondsSinceEpoch,
+        'endTime': endTime.toIso8601String(),
+        'endMillis': endTime.millisecondsSinceEpoch,
+        'location': location,
+        'description': description,
+        'sourceText': sourceText,
+        'sourceType': sourceType,
+        'reminderMinutes': reminderMinutes,
+        'checklist': checklist,
+        'confidence': confidence,
+        'syncedToSystemCalendar': syncedToSystemCalendar,
+        'deviceOrigin': deviceOrigin,
+        'systemCalendarEventId': systemCalendarEventId,
       };
 
   factory AgendaEvent.fromJson(Map<String, dynamic> json) {
-    final start = DateTime.tryParse(json['startTime']?.toString() ?? '') ??
-        DateTime.now().add(const Duration(hours: 1));
-    final end = DateTime.tryParse(json['endTime']?.toString() ?? '') ??
-        start.add(const Duration(hours: 1));
+    DateTime start;
+    final parsedStart = DateTime.tryParse(json['startTime']?.toString() ?? '');
+    if (parsedStart != null) {
+      start = parsedStart;
+    } else if (json['startMillis'] != null) {
+      final millis = (json['startMillis'] is num)
+          ? (json['startMillis'] as num).toInt()
+          : int.tryParse(json['startMillis'].toString());
+      start = millis != null
+          ? DateTime.fromMillisecondsSinceEpoch(millis)
+          : DateTime.now().add(const Duration(hours: 1));
+    } else {
+      start = DateTime.now().add(const Duration(hours: 1));
+    }
+
+    DateTime end;
+    final parsedEnd = DateTime.tryParse(json['endTime']?.toString() ?? '');
+    if (parsedEnd != null) {
+      end = parsedEnd;
+    } else if (json['endMillis'] != null) {
+      final millis = (json['endMillis'] is num)
+          ? (json['endMillis'] as num).toInt()
+          : int.tryParse(json['endMillis'].toString());
+      end = millis != null
+          ? DateTime.fromMillisecondsSinceEpoch(millis)
+          : start.add(const Duration(hours: 1));
+    } else {
+      end = start.add(const Duration(hours: 1));
+    }
+
     return AgendaEvent(
       id: json['id']?.toString() ??
           DateTime.now().microsecondsSinceEpoch.toString(),
@@ -73,6 +122,43 @@ class AgendaEvent {
           : 0.9,
       syncedToSystemCalendar: json['syncedToSystemCalendar'] == true,
       deviceOrigin: json['deviceOrigin']?.toString() ?? 'local',
+      systemCalendarEventId: json['systemCalendarEventId']?.toString(),
+    );
+  }
+
+  AgendaEvent copyWith({
+    String? id,
+    String? title,
+    DateTime? startTime,
+    DateTime? endTime,
+    String? location,
+    String? description,
+    String? sourceText,
+    String? sourceType,
+    int? reminderMinutes,
+    List<String>? checklist,
+    double? confidence,
+    bool? syncedToSystemCalendar,
+    String? deviceOrigin,
+    String? systemCalendarEventId,
+  }) {
+    return AgendaEvent(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      startTime: startTime ?? this.startTime,
+      endTime: endTime ?? this.endTime,
+      location: location ?? this.location,
+      description: description ?? this.description,
+      sourceText: sourceText ?? this.sourceText,
+      sourceType: sourceType ?? this.sourceType,
+      reminderMinutes: reminderMinutes ?? this.reminderMinutes,
+      checklist: checklist ?? List.from(this.checklist),
+      confidence: confidence ?? this.confidence,
+      syncedToSystemCalendar:
+          syncedToSystemCalendar ?? this.syncedToSystemCalendar,
+      deviceOrigin: deviceOrigin ?? this.deviceOrigin,
+      systemCalendarEventId:
+          systemCalendarEventId ?? this.systemCalendarEventId,
     );
   }
 

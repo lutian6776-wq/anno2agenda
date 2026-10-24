@@ -17,8 +17,11 @@ $env:all_proxy = ""
 # 2. 设置 Pub Cache 与 Flutter 环境
 $env:PUB_CACHE = "D:\.pub-cache"
 
-# 3. 停止可能残留卡死的 Gradle 后台守护进程
-Write-Host "[1/3] 正在检查并释放后台 Gradle 守护进程..." -ForegroundColor Yellow
+# 3. 停止可能残留卡死的 Gradle 后台守护进程，并解除 Flutter SDK 全局死锁
+Write-Host "[1/3] 正在检查并释放后台 Gradle 守护进程与 Flutter 锁文件..." -ForegroundColor Yellow
+if (Test-Path "D:\flutter\bin\cache\flutter.bat.lock") {
+    try { Remove-Item -Force "D:\flutter\bin\cache\flutter.bat.lock" -ErrorAction SilentlyContinue } catch {}
+}
 Push-Location "$PSScriptRoot\android"
 try {
     .\gradlew.bat --stop | Out-Null
