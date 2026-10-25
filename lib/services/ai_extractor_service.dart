@@ -19,12 +19,16 @@ class ExtractionResult {
   final String engineUsed;
   final int elapsedMs;
   final String promptPreview;
+  final String? rawResponse;
+  final String? jsonParseError;
 
   ExtractionResult({
     required this.events,
     required this.engineUsed,
     required this.elapsedMs,
     required this.promptPreview,
+    this.rawResponse,
+    this.jsonParseError,
   });
 }
 
@@ -44,25 +48,9 @@ class AIExtractorService {
   /// 全局共享的当前推理接口地址（供悬浮窗后台调用对齐主程序配置）
   static String currentLlmEndpoint = 'http://127.0.0.1:11434/api/generate';
 
-  static const List<String> _weekdays = [
-    '星期一',
-    '星期二',
-    '星期三',
-    '星期四',
-    '星期五',
-    '星期六',
-    '星期日'
-  ];
-
-  /// 构建带当前系统时间锚点与 JSON Schema 约束的端侧小模型 System Prompt
-  static String buildSystemPrompt(DateTime anchorTime) {
-    final weekdayStr = _weekdays[anchorTime.weekday - 1];
-    final dateStr =
-        '${anchorTime.year}-${anchorTime.month.toString().padLeft(2, '0')}-${anchorTime.day.toString().padLeft(2, '0')} '
-        '${anchorTime.hour.toString().padLeft(2, '0')}:${anchorTime.minute.toString().padLeft(2, '0')}';
-
-    return '''你是一个运行在端侧设备的高校通知日程提取助手。
-【当前系统时间锚点】：$dateStr ($weekdayStr)
+  /// 默认标准系统提示词模板（支持 {TIME_ANCHOR} 宏替换）
+  static const String defaultSystemPromptTemplate = '''你是一个运行在端侧设备的高校通知日程提取助手。
+【当前系统时间锚点】：{TIME_ANCHOR}
 请从用户输入的杂乱群通知、教务文档或视频字幕中提取出所有日程事件，并将相对时间（如“明天”、“本周日”、“下周三晚7点”）严格换算为基于当前时间锚点的 ISO-8601 格式时间。
 必须输出如下结构的 JSON 对象：
 {
@@ -79,6 +67,80 @@ class AIExtractorService {
     }
   ]
 }''';
+
+  /// 用户自定义配置的系统提示词（若为 null 则使用 defaultSystemPromptTemplate）
+  static String? customSystemPromptTemplate;
+  static File? _promptStorageFile;
+
+  /// 初始化提示词持久化存储
+  static Future<void> initPromptStorage([String? baseDir]) async {
+    try {
+      String dir = baseDir ?? '';
+      if (dir.isEmpty) {
+        dir = Directory.current.path;
+      }
+      final file = File('$dir/custom_system_prompt.txt');
+      _promptStorageFile = file;
+      if (await file.exists()) {
+        final text = await file.readAsString();
+        if (text.trim().isNotEmpty) {
+          customSystemPromptTemplate = text;
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 保存自定义系统提示词
+  static Future<void> saveCustomPrompt(String? prompt) async {
+    customSystemPromptTemplate = prompt?.trim().isEmpty == true ? null : prompt;
+    try {
+      if (_promptStorageFile != null) {
+        if (customSystemPromptTemplate != null) {
+          await _promptStorageFile!.writeAsString(customSystemPromptTemplate!);
+        } else if (await _promptStorageFile!.exists()) {
+          await _promptStorageFile!.delete();
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// 恢复默认提示词
+  static Future<void> resetDefaultPrompt() async {
+    await saveCustomPrompt(null);
+  }
+
+  static const List<String> _weekdays = [
+    '星期一',
+    '星期二',
+    '星期三',
+    '星期四',
+    '星期五',
+    '星期六',
+    '星期日'
+  ];
+
+  /// 构建带当前系统时间锚点与 JSON Schema 约束的端侧小模型 System Prompt
+  static String buildSystemPrompt(DateTime anchorTime, [String? overrideTemplate]) {
+    final weekdayStr = _weekdays[anchorTime.weekday - 1];
+    final dateStr =
+        '${anchorTime.year}-${anchorTime.month.toString().padLeft(2, '0')}-${anchorTime.day.toString().padLeft(2, '0')} '
+        '${anchorTime.hour.toString().padLeft(2, '0')}:${anchorTime.minute.toString().padLeft(2, '0')}';
+    final timeAnchor = '$dateStr ($weekdayStr)';
+
+    final template = (overrideTemplate != null && overrideTemplate.trim().isNotEmpty)
+        ? overrideTemplate
+        : (customSystemPromptTemplate ?? defaultSystemPromptTemplate);
+
+    if (template.contains('{TIME_ANCHOR}')) {
+      return template.replaceAll('{TIME_ANCHOR}', timeAnchor);
+    }
+    if (template.contains('【当前系统时间锚点】：')) {
+      return template.replaceFirst(
+        RegExp(r'【当前系统时间锚点】：.*'),
+        '【当前系统时间锚点】：$timeAnchor',
+      );
+    }
+    return '【当前系统时间锚点】：$timeAnchor\n\n$template';
   }
 
   /// 主提取入口（Android 与 Windows 100% 共用）
@@ -89,11 +151,12 @@ class AIExtractorService {
     String llmEndpoint = 'http://127.0.0.1:11434/api/generate',
     String? llmModelName,
     bool? thinkMode,
+    String? customSystemPrompt,
     ExtractionProgressCallback? onProgress,
   }) async {
     final sw = Stopwatch()..start();
     final now = DateTime.now();
-    final prompt = buildSystemPrompt(now);
+    final prompt = buildSystemPrompt(now, customSystemPrompt);
     final deviceOrigin = Platform.isAndroid ? 'android' : 'windows';
     final effectiveThink = thinkMode ?? LocalModelManager.enableThinkMode;
 
@@ -431,6 +494,253 @@ class AIExtractorService {
       }
     }
     return results;
+  }
+
+  /// 深度解析大模型返回文本，提取日程对象并捕获格式/JSON 诊断错误
+  static ({List<AgendaEvent> events, String? parseError}) parseAndDiagnoseJson({
+    required String rawJson,
+    required String rawText,
+    String sourceType = 'test',
+    String deviceOrigin = 'local',
+  }) {
+    final trimmed = rawJson.trim();
+    if (trimmed.isEmpty) {
+      return (events: <AgendaEvent>[], parseError: '大模型返回内容为空');
+    }
+
+    dynamic parsedJson;
+    String? lastError;
+
+    // 1. 先尝试直接标准解码
+    try {
+      parsedJson = jsonDecode(trimmed);
+    } catch (e) {
+      lastError = e.toString();
+    }
+
+    // 2. 尝试从 markdown 代码块 ```json ... ``` 中截取
+    if (parsedJson == null) {
+      final codeBlockRegex =
+          RegExp(r'```(?:json)?\s*([\s\S]*?)\s*```', caseSensitive: false);
+      final match = codeBlockRegex.firstMatch(trimmed);
+      if (match != null) {
+        try {
+          parsedJson = jsonDecode(match.group(1)!);
+          lastError = '注意：大模型将 JSON 包裹在 markdown 代码块中';
+        } catch (e) {
+          lastError = '代码块内 JSON 语法错误: $e';
+        }
+      }
+    }
+
+    // 3. 尝试首尾平衡大括号截取
+    if (parsedJson == null) {
+      final startObj = trimmed.indexOf('{');
+      final endObj = trimmed.lastIndexOf('}');
+      if (startObj != -1 && endObj > startObj) {
+        final sub = trimmed.substring(startObj, endObj + 1);
+        try {
+          parsedJson = jsonDecode(sub);
+          lastError = '注意：大模型在 JSON 前后输出了额外非 JSON 闲聊文字';
+        } catch (e) {
+          lastError = '截取外层花括号后解析仍失败: $e';
+        }
+      }
+    }
+
+    // 4. 尝试提取 events 数组
+    List<dynamic> rawList = [];
+    if (parsedJson is List) {
+      rawList = parsedJson;
+    } else if (parsedJson is Map) {
+      if (parsedJson['events'] is List) {
+        rawList = parsedJson['events'] as List;
+      } else if (parsedJson.containsKey('title')) {
+        rawList = [parsedJson];
+      }
+    }
+
+    // 5. 兜底扫描孤立 event 对象
+    if (rawList.isEmpty) {
+      final fallbackObjects = _extractBalancedEventObjects(trimmed);
+      if (fallbackObjects.isNotEmpty) {
+        rawList = fallbackObjects;
+        lastError = '警告：大模型未生成规范顶层 events 数组，仅提取出内层零散对象';
+      }
+    }
+
+    final events = <AgendaEvent>[];
+    for (final item in rawList) {
+      if (item is! Map) continue;
+      try {
+        final map = Map<String, dynamic>.from(item);
+        map['sourceText'] = rawText;
+        map['sourceType'] = sourceType;
+        map['deviceOrigin'] = deviceOrigin;
+        events.add(AgendaEvent.fromJson(map));
+      } catch (e) {
+        lastError = '部分日程项字段缺失或类型错误: $e';
+      }
+    }
+
+    if (events.isEmpty && lastError == null) {
+      lastError = '未在输出中检测到有效的日程字段 (缺少 title / startTime 等关键键)';
+    }
+
+    final isCleanStandardJson = events.isNotEmpty &&
+        parsedJson is Map &&
+        parsedJson['events'] is List &&
+        !trimmed.contains('```') &&
+        lastError == null;
+
+    return (
+      events: events,
+      parseError: isCleanStandardJson ? null : lastError,
+    );
+  }
+
+  /// 专用提示词调试测试推理接口（不回退规则引擎，保留完整原始流与错误诊断）
+  static Future<ExtractionResult> testInference({
+    required String userPrompt,
+    required String systemPrompt,
+    String? modelName,
+    String llmEndpoint = 'http://127.0.0.1:11434/api/generate',
+    bool thinkMode = false,
+    ExtractionProgressCallback? onProgress,
+  }) async {
+    final sw = Stopwatch()..start();
+    final now = DateTime.now();
+    final prompt = buildSystemPrompt(now, systemPrompt);
+    final deviceOrigin = Platform.isAndroid ? 'android' : 'windows';
+
+    onProgress?.call(stepLog: '[测试] 启动端侧模型提示词独立调试...');
+    onProgress?.call(stepLog: '[注入] 已构建系统提示词 (长度: ${prompt.length} 字符)');
+
+    var tokenCounter = 0;
+    String targetModel = modelName ?? '';
+    if (targetModel.isEmpty) {
+      final activeModels =
+          await LocalModelManager.ensureLocalRuntimeAndListModels();
+      targetModel = activeModels.isNotEmpty ? activeModels.first : 'qwen3.5:2b';
+    }
+
+    try {
+      // 1. Android 端侧 llama.cpp
+      if (Platform.isAndroid && !llmEndpoint.endsWith('/extract')) {
+        final localGguf = await LocalModelManager.findLocalGgufFile(targetModel);
+        if (localGguf != null) {
+          onProgress?.call(
+            stepLog: '[路由] 载入内嵌引擎: $targetModel (llama.cpp)',
+          );
+          final rawOut = await LocalModelManager.runAndroidNativeInference(
+            systemPrompt: prompt,
+            userPrompt: userPrompt,
+            preferredModelId: targetModel,
+            thinkMode: thinkMode,
+            onToken: (tok) {
+              tokenCounter++;
+              onProgress?.call(token: tok, tokenCount: tokenCounter);
+            },
+          );
+          sw.stop();
+          final raw = rawOut ?? '';
+          final diag = parseAndDiagnoseJson(
+            rawJson: raw,
+            rawText: userPrompt,
+            sourceType: 'prompt_test',
+            deviceOrigin: deviceOrigin,
+          );
+          onProgress?.call(
+            stepLog:
+                '[完成] 推理结束 (${sw.elapsedMilliseconds}ms)，提取到 ${diag.events.length} 个日程事项',
+          );
+          return ExtractionResult(
+            events: diag.events,
+            engineUsed: 'Android 端侧引擎 ($targetModel)',
+            elapsedMs: sw.elapsedMilliseconds,
+            promptPreview: prompt,
+            rawResponse: raw,
+            jsonParseError: diag.parseError,
+          );
+        }
+      }
+
+      // 2. Windows 桌面端或 HTTP 接口
+      onProgress?.call(stepLog: '[路由] 连接本地推理引擎: $targetModel');
+      final client = LocalModelManager.createDirectHttpClient(
+        timeout: const Duration(seconds: 4),
+      );
+      try {
+        final uri = Uri.parse(llmEndpoint);
+        final req = await client.postUrl(uri);
+        req.headers.contentType =
+            ContentType('application', 'json', charset: 'utf-8');
+        final body = {
+          'model': targetModel,
+          'system': prompt,
+          'prompt': userPrompt,
+          'stream': true,
+          'think': thinkMode,
+          'format': 'json',
+        };
+        req.add(utf8.encode(jsonEncode(body)));
+        final resp =
+            await req.close().timeout(Duration(seconds: thinkMode ? 75 : 40));
+        if (resp.statusCode != 200) {
+          throw Exception('服务端返回状态码: ${resp.statusCode}');
+        }
+        LocalModelManager.markLoaded(targetModel);
+
+        final fullResponse = StringBuffer();
+        await for (final line in resp
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())) {
+          if (line.trim().isEmpty) continue;
+          try {
+            final parsed = jsonDecode(line);
+            if (parsed is Map && parsed.containsKey('response')) {
+              final tok = parsed['response']?.toString() ?? '';
+              fullResponse.write(tok);
+              tokenCounter++;
+              onProgress?.call(token: tok, tokenCount: tokenCounter);
+            }
+          } catch (_) {}
+        }
+        sw.stop();
+        final raw = fullResponse.toString();
+        final diag = parseAndDiagnoseJson(
+          rawJson: raw,
+          rawText: userPrompt,
+          sourceType: 'prompt_test',
+          deviceOrigin: deviceOrigin,
+        );
+        onProgress?.call(
+          stepLog:
+              '[完成] 推理结束 (${sw.elapsedMilliseconds}ms)，提取到 ${diag.events.length} 个日程事项',
+        );
+        return ExtractionResult(
+          events: diag.events,
+          engineUsed: '端侧大模型 ($targetModel)',
+          elapsedMs: sw.elapsedMilliseconds,
+          promptPreview: prompt,
+          rawResponse: raw,
+          jsonParseError: diag.parseError,
+        );
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      sw.stop();
+      onProgress?.call(stepLog: '[错误] 推理调试失败: $e');
+      return ExtractionResult(
+        events: [],
+        engineUsed: '调试失败',
+        elapsedMs: sw.elapsedMilliseconds,
+        promptPreview: prompt,
+        rawResponse: '',
+        jsonParseError: '推理异常: $e',
+      );
+    }
   }
 
   /// 内置高校通知多节点时空启发式解析器（支持一段通知拆出多个日程节点）

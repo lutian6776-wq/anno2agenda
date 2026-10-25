@@ -6,6 +6,7 @@ import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/theme_manager.dart';
+import 'prompt_testing_page.dart';
 
 /// 「设置」页面（大模型常驻、Android 原生无障碍悬浮窗、局域网协同与关于）
 class SettingsPage extends StatefulWidget {
@@ -1031,7 +1032,125 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 设置模块 4：关于知程
+  /// 设置模块 4：高级与开发者设置（系统提示词微调与端侧推理测试）
+  Widget _buildAdvancedSettingsCard(bool isDark) {
+    final primaryColor =
+        isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB);
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.tune, color: primaryColor, size: 20),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    '高级设置',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                ),
+                _buildInfoBoxButton(
+                  infoKey: 'advancedGuide',
+                  tooltip: '查看高级设置说明',
+                  isDark: isDark,
+                ),
+              ],
+            ),
+            if (_expandedInfoKeys.contains('advancedGuide'))
+              _buildExpandedInfoBox(
+                '• 系统提示词修改与测试：端侧小模型常因提示词不严密而产生 markdown 冗余或非标准 JSON。在此可深度编辑 System Prompt，支持 {TIME_ANCHOR} 宏，并通过全尺寸端侧终端实时观察流式 Token 与 JSON 语法诊断。\n'
+                '• 保存后的提示词将自动持久化，并全局应用到日程提取与悬浮窗中。',
+                isDark: isDark,
+              ),
+            const SizedBox(height: 12),
+            InkWell(
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => const PromptTestingPage(),
+                  ),
+                );
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF1E293B)
+                      : const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isDark
+                        ? const Color(0xFF334155)
+                        : const Color(0xFFE2E8F0),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: primaryColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(Icons.psychology_alt,
+                          color: primaryColor, size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '系统提示词修改与测试',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '自定义 System Prompt 模板、注入时间锚点并进行全尺寸推理实况调试',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isDark
+                                  ? const Color(0xFF94A3B8)
+                                  : Colors.grey.shade600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      size: 14,
+                      color: isDark
+                          ? const Color(0xFF64748B)
+                          : Colors.grey.shade400,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 设置模块 5：关于知程
   Widget _buildAboutCard(bool isDark) {
     final primaryColor =
         isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB);
@@ -1107,6 +1226,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 14),
         ],
         _buildLanSyncCard(isDark),
+        const SizedBox(height: 14),
+        _buildAdvancedSettingsCard(isDark),
         const SizedBox(height: 14),
         _buildAboutCard(isDark),
       ],

@@ -92,6 +92,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   Future<void> _initServices() async {
     await AgendaRepository.instance.init();
+    await AIExtractorService.initPromptStorage();
 
     final ips = await LanSyncService.getLocalIps();
     await LanSyncService.startServer(

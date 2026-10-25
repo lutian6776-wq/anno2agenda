@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// 实时端侧推理过程实况终端（带打字机流式输出、进度耗时、Token 统计与折叠面板）
 class InferenceTerminal extends StatefulWidget {
@@ -7,6 +8,8 @@ class InferenceTerminal extends StatefulWidget {
   final String streamedTokens;
   final int tokenCount;
   final double elapsedSeconds;
+  final double? maxHeight;
+  final bool initialExpanded;
 
   const InferenceTerminal({
     super.key,
@@ -15,6 +18,8 @@ class InferenceTerminal extends StatefulWidget {
     required this.streamedTokens,
     required this.tokenCount,
     required this.elapsedSeconds,
+    this.maxHeight,
+    this.initialExpanded = true,
   });
 
   @override
@@ -22,8 +27,14 @@ class InferenceTerminal extends StatefulWidget {
 }
 
 class _InferenceTerminalState extends State<InferenceTerminal> {
-  bool _showLogs = true;
+  late bool _showLogs;
   final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _showLogs = widget.initialExpanded;
+  }
 
   @override
   void didUpdateWidget(covariant InferenceTerminal oldWidget) {
@@ -158,6 +169,33 @@ class _InferenceTerminalState extends State<InferenceTerminal> {
                   ),
                 ],
                 const Spacer(),
+                if (widget.streamedTokens.isNotEmpty || widget.processLogs.isNotEmpty)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 24, minHeight: 24),
+                    tooltip: '复制终端全部内容',
+                    icon: Icon(
+                      Icons.copy_rounded,
+                      size: 15,
+                      color: Colors.grey.shade400,
+                    ),
+                    onPressed: () {
+                      final text = widget.streamedTokens.isNotEmpty
+                          ? widget.streamedTokens
+                          : widget.processLogs.join('\n');
+                      Clipboard.setData(ClipboardData(text: text));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('已复制终端实况内容至剪贴板'),
+                          behavior: SnackBarBehavior.floating,
+                          duration: Duration(seconds: 1),
+                        ),
+                      );
+                    },
+                  ),
+                const SizedBox(width: 4),
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   padding: EdgeInsets.zero,
@@ -182,7 +220,7 @@ class _InferenceTerminalState extends State<InferenceTerminal> {
           // 终端正文（可折叠）
           if (_showLogs)
             Container(
-              constraints: const BoxConstraints(maxHeight: 200),
+              constraints: BoxConstraints(maxHeight: widget.maxHeight ?? 200),
               padding: const EdgeInsets.all(12),
               child: SingleChildScrollView(
                 controller: _scrollController,
