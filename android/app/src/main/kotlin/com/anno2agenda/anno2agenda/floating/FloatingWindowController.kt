@@ -127,7 +127,10 @@ class FloatingWindowController(
     }
 
     /**
-     * 展开悬浮卡片并允许获取输入焦点
+     * 展开悬浮卡片
+     * 默认保持 FLAG_NOT_FOCUSABLE + FLAG_NOT_TOUCH_MODAL，绝不抢占底层微信/QQ等宿主窗口焦点，
+     * 从而确保 AccessibilityService 始终能读取到底层应用主窗口而非被悬浮窗遮蔽后的状态栏。
+     * 仅当用户主动点击输入框编辑文字时，才按需切换为可聚焦状态唤起软键盘。
      */
     fun expandPanel() {
         val params = layoutParams ?: return
@@ -137,11 +140,30 @@ class FloatingWindowController(
         bubbleView.visibility = View.GONE
         panelView.visibility = View.VISIBLE
 
-        // 移除 FLAG_NOT_FOCUSABLE 允许读取剪贴板及在 EditText 中输入微调
-        params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         params.x = (context.resources.displayMetrics.widthPixels * 0.04).toInt()
         params.y = dp(90)
 
+        try {
+            windowManager.updateViewLayout(rootContainer, params)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 按需开启或关闭软键盘输入焦点（点击 EditText 时开启，识屏/收起时关闭并归还焦点给底层应用）
+     */
+    fun setKeyboardFocusable(focusable: Boolean) {
+        val params = layoutParams ?: return
+        params.flags = if (focusable) {
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        } else {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        }
         try {
             windowManager.updateViewLayout(rootContainer, params)
         } catch (_: Exception) {}
@@ -156,20 +178,39 @@ class FloatingWindowController(
         panelView.visibility = View.GONE
         bubbleView.visibility = View.VISIBLE
 
-        // 恢复 FLAG_NOT_FOCUSABLE 避免拦截下方宿主应用手势
-        params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        // 恢复 FLAG_NOT_FOCUSABLE 避免拦截下方宿主应用手势与无障碍焦点
+        params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         snapToNearestEdge()
         scheduleIdleDim()
     }
 
     /**
-     * 截屏前临时将整个容器隐身 140ms，避免遮挡底层应用内容
+     * 识屏或截屏期间彻底隐藏悬浮窗并归还窗口焦点，采集完成后再恢复显示
+     */
+    fun setOverlayHiddenForCapture(hidden: Boolean) {
+        val params = layoutParams ?: return
+        if (hidden) {
+            params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            rootContainer.visibility = View.GONE
+        } else {
+            rootContainer.visibility = View.VISIBLE
+        }
+        try {
+            windowManager.updateViewLayout(rootContainer, params)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * 兼容旧接口：截屏前临时隐藏
      */
     fun hideTemporarilyForScreenshot(durationMs: Long = 140L, onHidden: () -> Unit) {
-        rootContainer.visibility = View.INVISIBLE
+        setOverlayHiddenForCapture(true)
         mainHandler.postDelayed({
             onHidden()
-            rootContainer.visibility = View.VISIBLE
+            setOverlayHiddenForCapture(false)
         }, durationMs)
     }
 

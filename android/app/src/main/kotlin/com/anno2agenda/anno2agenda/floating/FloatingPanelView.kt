@@ -36,6 +36,7 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
     var onReAnalyzeClicked: ((String) -> Unit)? = null
     var onWriteAllClicked: ((List<FloatingOverlayEvent>) -> Unit)? = null
     var onOpenPermissionSettingsClicked: (() -> Unit)? = null
+    var onInputFocusRequested: (() -> Unit)? = null
 
     private val titleView: TextView
     private val closeBtn: TextView
@@ -151,6 +152,17 @@ class FloatingPanelView(context: Context) : LinearLayout(context) {
                 setStroke(dp(1), Color.parseColor("#E2E8F0"))
             }
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+            setOnTouchListener { v, event ->
+                if (event.action == android.view.MotionEvent.ACTION_DOWN) {
+                    onInputFocusRequested?.invoke()
+                    v.postDelayed({
+                        v.requestFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                        imm?.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                    }, 60)
+                }
+                false
+            }
         }
         reAnalyzeBtn = createChipButton("AI 解析", "#2563EB", "#FFFFFF") {
             val text = inputEditText.text?.toString()?.trim() ?: ""

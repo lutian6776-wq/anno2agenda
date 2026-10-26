@@ -735,6 +735,14 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           onRemoveDraft: (ev) {
             setState(() => _draftEvents.removeWhere((e) => e.id == ev.id));
           },
+          onUpdateDraft: (ev) {
+            setState(() {
+              final idx = _draftEvents.indexWhere((e) => e.id == ev.id);
+              if (idx >= 0) {
+                _draftEvents[idx] = ev;
+              }
+            });
+          },
         );
       case 1:
         return Padding(

@@ -22,28 +22,68 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
             get() = instance != null
     }
 
+    @Volatile
+    private var lastCachedAppTexts: List<String> = emptyList()
+    @Volatile
+    private var lastCacheTimestamp: Long = 0L
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        // 动态加固无障碍服务配置标志，确保与 TalkBack 同级别访问 IM 内部自定义消息视图与虚拟节点树
+        // 在保留 XML 声明的 canRetrieveWindowContent 与 canTakeScreenshot 能力前提下，补充增强视图标志
         try {
-            val info = serviceInfo ?: AccessibilityServiceInfo()
-            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
-            info.feedbackType =
-                AccessibilityServiceInfo.FEEDBACK_SPOKEN or AccessibilityServiceInfo.FEEDBACK_GENERIC
-            info.flags = info.flags or
-                    AccessibilityServiceInfo.DEFAULT or
-                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
-                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                    AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY
-            info.notificationTimeout = 80
-            serviceInfo = info
+            val info = serviceInfo
+            if (info != null) {
+                info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+                info.feedbackType =
+                    AccessibilityServiceInfo.FEEDBACK_SPOKEN or AccessibilityServiceInfo.FEEDBACK_GENERIC
+                info.flags = info.flags or
+                        AccessibilityServiceInfo.DEFAULT or
+                        AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                        AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                        AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                serviceInfo = info
+            }
         } catch (_: Exception) {}
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 仅在用户主动点击悬浮窗「读当前屏幕」或「截屏OCR」时按需读取，平时 0 性能消耗、不后台窃取隐私
+        if (event == null) return
+        // 当悬浮窗开启时，在后台轻量记录当前宿主应用主窗口的最新节点快照（节流 800ms），
+        // 防止部分定制 ROM 在点击悬浮窗瞬间临时切换焦点导致活动窗口短暂为空
+        if (!com.anno2agenda.anno2agenda.floating.FloatingBubbleService.isRunning) return
+
+        val pkg = event.packageName?.toString() ?: ""
+        if (pkg.isEmpty() || isIgnoredWindowPackage(pkg)) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastCacheTimestamp < 800L) return
+
+        val root = try {
+            rootInActiveWindow ?: event.source
+        } catch (_: Exception) {
+            null
+        } ?: return
+
+        val rootPkg = root.packageName?.toString() ?: pkg
+        if (isIgnoredWindowPackage(rootPkg)) return
+
+        lastCacheTimestamp = now
+        val snapshot = LinkedHashSet<String>()
+        traverseNode(root, snapshot, 0)
+        if (snapshot.isNotEmpty()) {
+            lastCachedAppTexts = snapshot.toList()
+        }
+    }
+
+    private fun isIgnoredWindowPackage(pkg: String): Boolean {
+        return pkg == packageName ||
+                pkg == "com.android.systemui" ||
+                pkg.contains("inputmethod") ||
+                pkg.contains("latinime") ||
+                pkg.contains("sohu.inputmethod") ||
+                pkg.contains("baidu.input") ||
+                pkg.contains("iflytek.inputmethod")
     }
 
     override fun onInterrupt() {}
@@ -56,29 +96,14 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 方案 A：免截屏、免 OCR，直接深度遍历当前屏幕应用（如微信/QQ/飞书/钉钉/浏览器）完整无障碍节点树
-     * 不做任何关键词黑名单、长度截断或正则过滤，保留完整原始上下文交由端侧 LLM 理解
+     * 方案 A：免截屏、免 OCR，直接深度遍历当前屏幕主应用（如微信/QQ/飞书/钉钉/浏览器）完整无障碍节点树
+     * 严格排除 com.android.systemui 顶部状态栏（时间/电量/信号/通知图标）与软键盘干扰，
+     * 对主应用窗口内容不做任何关键词黑名单、长度截断或正则过滤，保留完整原始上下文交由端侧 LLM 理解。
      */
     fun extractCurrentScreenText(): String {
         val collected = LinkedHashSet<String>()
 
-        // 1. 先检查当前焦点活动窗口 rootInActiveWindow（确保底层主聊天窗口优先被完整遍历）
-        val activeRoot = try {
-            rootInActiveWindow
-        } catch (_: Exception) {
-            null
-        }
-        if (activeRoot != null) {
-            val activePkg = activeRoot.packageName?.toString() ?: ""
-            if (activePkg != packageName) {
-                try {
-                    activeRoot.refresh()
-                } catch (_: Exception) {}
-                traverseNode(activeRoot, collected, 0)
-            }
-        }
-
-        // 2. 同时遍历所有多层窗口（优先应用层窗口，其次系统层/悬浮通知窗口，仅跳过本应用自身窗口）
+        // 1. 先读取所有应用层窗口 (TYPE_APPLICATION)，彻底跳过 com.android.systemui 状态栏与本应用悬浮窗
         val winList = try {
             windows
         } catch (_: Exception) {
@@ -86,28 +111,43 @@ class ScreenCaptureAccessibilityService : AccessibilityService() {
         }
 
         if (!winList.isNullOrEmpty()) {
-            val sortedWindows = winList.sortedBy { win ->
-                when (win.type) {
-                    AccessibilityWindowInfo.TYPE_APPLICATION -> 0
-                    AccessibilityWindowInfo.TYPE_INPUT_METHOD -> 2
-                    else -> 1
-                }
+            val appWindows = winList.filter { win ->
+                win.type == AccessibilityWindowInfo.TYPE_APPLICATION ||
+                        win.type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
             }
-            for (win in sortedWindows) {
+            val targetWindows = if (appWindows.isNotEmpty()) appWindows else winList
+
+            for (win in targetWindows) {
+                if (win.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
                 val root = try {
                     win.root
                 } catch (_: Exception) {
                     null
                 } ?: continue
                 val pkg = root.packageName?.toString() ?: ""
-                if (pkg == packageName) {
+                if (isIgnoredWindowPackage(pkg)) {
                     continue
                 }
-                try {
-                    root.refresh()
-                } catch (_: Exception) {}
                 traverseNode(root, collected, 0)
             }
+        }
+
+        // 2. 同时检查 rootInActiveWindow（补充可能未出现在 windows 列表中的当前焦点主窗口）
+        val activeRoot = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        }
+        if (activeRoot != null) {
+            val activePkg = activeRoot.packageName?.toString() ?: ""
+            if (!isIgnoredWindowPackage(activePkg)) {
+                traverseNode(activeRoot, collected, 0)
+            }
+        }
+
+        // 3. 若因悬浮窗焦点切换瞬态导致实时查询为空，回退使用点击悬浮窗前已捕获的宿主应用主窗口快照
+        if (collected.isEmpty() && lastCachedAppTexts.isNotEmpty()) {
+            collected.addAll(lastCachedAppTexts)
         }
 
         return collected.joinToString("\n")

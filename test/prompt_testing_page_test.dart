@@ -49,6 +49,31 @@ void main() {
     );
     expect(diag3.events.isEmpty, isTrue);
     expect(diag3.parseError, isNotNull);
+
+    // 4. 违反 GBNF ISO-8601 时间格式的 JSON（容错能提取出事件，但诊断出 GBNF 违规）
+    const nonIsoTimeJson = '''{
+      "events": [
+        {
+          "title": "实验课",
+          "startTime": "明天下午两点",
+          "endTime": "明天下午四点"
+        }
+      ]
+    }''';
+    final diag4 = AIExtractorService.parseAndDiagnoseJson(
+      rawJson: nonIsoTimeJson,
+      rawText: '测试通知',
+    );
+    expect(diag4.events.length, 1);
+    expect(diag4.parseError, contains('GBNF'));
+  });
+
+  test('AIExtractorService GBNF grammar and JSON schema definitions are valid', () {
+    expect(AIExtractorService.defaultAgendaGbnfGrammar, contains('root ::='));
+    expect(AIExtractorService.defaultAgendaGbnfGrammar, contains('iso-datetime ::='));
+    expect(AIExtractorService.prefilledAgendaGbnfGrammar, contains('root ::= ws (event-list)?'));
+    expect(AIExtractorService.agendaJsonSchema['type'], equals('object'));
+    expect(AIExtractorService.agendaJsonSchema['required'], contains('events'));
   });
 
   testWidgets('SettingsPage renders Advanced Settings card and navigates to PromptTestingPage',

@@ -2458,227 +2458,16 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
       itemCount: selectedEvents.length,
       itemBuilder: (context, idx) {
         final ev = selectedEvents[idx];
-        return _buildNormalCalendarAgendaCard(ev, isDesktop: isDesktop);
+        return AgendaEventCard(
+          event: ev,
+          showDate: false,
+          isDraft: false,
+          onSyncCalendar: () => _writeToCalendar(ev),
+          onDelete: () => _confirmDelete(ev),
+          onEventChanged: (updated) => _repo.updateEvent(updated),
+          onTap: () => _showEventDetailSheet(ev),
+        );
       },
-    );
-  }
-
-  /// 手机与桌面自适应风格日程卡片（移动端契合截图，桌面端展开快捷操作不遮挡）
-  Widget _buildNormalCalendarAgendaCard(AgendaEvent event,
-      {bool isDesktop = false}) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: 0,
-      color: isDark ? const Color(0xFF1E1E22) : Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: event.syncedToSystemCalendar
-              ? (isDark ? const Color(0xFF065F46) : const Color(0xFFBBF7D0))
-              : (isDark ? const Color(0xFF2C2C32) : const Color(0xFFE2E8F0)),
-        ),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: () => _showEventDetailSheet(event),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 标题行：左侧指示蓝点 + 标题加粗大字 + 桌面端快捷动作
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 7,
-                    height: 7,
-                    margin: const EdgeInsets.only(right: 8),
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF3B82F6),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      event.title,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white : const Color(0xFF0F172A),
-                      ),
-                    ),
-                  ),
-                  if (event.syncedToSystemCalendar) ...[
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: isDark
-                            ? const Color(0xFF064E3B)
-                            : const Color(0xFFDCFCE7),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.check,
-                              size: 11,
-                              color: isDark
-                                  ? const Color(0xFF34D399)
-                                  : const Color(0xFF16A34A)),
-                          const SizedBox(width: 3),
-                          Text('已同步日历',
-                              style: TextStyle(
-                                  color: isDark
-                                      ? const Color(0xFF34D399)
-                                      : const Color(0xFF16A34A),
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w600)),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-                  if (isDesktop) ...[
-                    if (!event.syncedToSystemCalendar)
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          minimumSize: Size.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        onPressed: () => _writeToCalendar(event),
-                        icon: const Icon(Icons.calendar_month,
-                            size: 13, color: Color(0xFF60A5FA)),
-                        label: const Text('写入系统日历',
-                            style: TextStyle(
-                                fontSize: 11.5, color: Color(0xFF60A5FA))),
-                      ),
-                    IconButton(
-                      icon: Icon(Icons.edit_outlined,
-                          size: 16,
-                          color: isDark
-                              ? const Color(0xFF9CA3AF)
-                              : const Color(0xFF64748B)),
-                      tooltip: '查看与编辑详情',
-                      constraints:
-                          const BoxConstraints(minWidth: 28, minHeight: 28),
-                      padding: EdgeInsets.zero,
-                      onPressed: () => _showEventDetailSheet(event),
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.delete_outline,
-                          size: 16, color: Colors.red.shade400),
-                      tooltip: '删除日程',
-                      constraints:
-                          const BoxConstraints(minWidth: 28, minHeight: 28),
-                      padding: EdgeInsets.zero,
-                      onPressed: () => _confirmDelete(event),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 5),
-
-              // 时间段：如 10:10-12:00
-              Padding(
-                padding: const EdgeInsets.only(left: 15),
-                child: Row(
-                  children: [
-                    Icon(Icons.access_time,
-                        size: 13,
-                        color: isDark
-                            ? const Color(0xFF9CA3AF)
-                            : const Color(0xFF64748B)),
-                    const SizedBox(width: 5),
-                    Text(
-                      '${_two(event.startTime.hour)}:${_two(event.startTime.minute)}–${_two(event.endTime.hour)}:${_two(event.endTime.minute)}',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: isDark
-                            ? const Color(0xFF9CA3AF)
-                            : const Color(0xFF64748B),
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              // 地点/主讲人说明：如 南校区 南6-A507 季永运
-              if (event.location.isNotEmpty) ...[
-                const SizedBox(height: 3),
-                Padding(
-                  padding: const EdgeInsets.only(left: 15),
-                  child: Row(
-                    children: [
-                      Icon(Icons.location_on_outlined,
-                          size: 13,
-                          color: isDark
-                              ? const Color(0xFF9CA3AF)
-                              : const Color(0xFF64748B)),
-                      const SizedBox(width: 5),
-                      Expanded(
-                        child: Text(
-                          event.location,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: isDark
-                                ? const Color(0xFF9CA3AF)
-                                : const Color(0xFF64748B),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-
-              // 桌面宽屏下展示清单或备注概览
-              if (isDesktop && event.checklist.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Padding(
-                  padding: const EdgeInsets.only(left: 15),
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: event.checklist.map((item) {
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: isDark
-                              ? const Color(0xFF27272A)
-                              : const Color(0xFFF1F5F9),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.check,
-                                size: 10, color: Color(0xFF34D399)),
-                            const SizedBox(width: 4),
-                            Text(item,
-                                style: TextStyle(
-                                    color: isDark
-                                        ? const Color(0xFFD1D5DB)
-                                        : const Color(0xFF334155),
-                                    fontSize: 11)),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
     );
   }
 
@@ -2741,9 +2530,11 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
                     final ev = filtered[idx];
                     return AgendaEventCard(
                       event: ev,
+                      showDate: true,
                       isDraft: false,
                       onSyncCalendar: () => _writeToCalendar(ev),
                       onDelete: () => _confirmDelete(ev),
+                      onEventChanged: (updated) => _repo.updateEvent(updated),
                       onTap: () => _showEventDetailSheet(ev),
                     );
                   },

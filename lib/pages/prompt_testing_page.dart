@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io' show Platform;
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/agenda_event.dart';
@@ -8,7 +10,7 @@ import '../widgets/agenda_event_card.dart';
 import '../widgets/inference_terminal.dart';
 import 'ai_extract_page.dart';
 
-/// 系统提示词修改与端侧推理测试调优工作台
+/// 系统提示词修改与端侧推理测试调优工作台（支持多种屏幕比例与桌面端自适应）
 class PromptTestingPage extends StatefulWidget {
   const PromptTestingPage({super.key});
 
@@ -20,8 +22,15 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
   final TextEditingController _promptController = TextEditingController();
   final TextEditingController _testTextController = TextEditingController();
 
+  // 独立滚动控制器，确保桌面端 Scrollbar 正确绑定且各栏平滑滚动
+  final ScrollController _leftScrollController = ScrollController();
+  final ScrollController _midScrollController = ScrollController();
+  final ScrollController _rightScrollController = ScrollController();
+  final ScrollController _singleScrollController = ScrollController();
+
   bool _isTesting = false;
   bool _thinkMode = false;
+  bool _useGbnf = true;
   String? _selectedModel;
   List<String> _availableModels = [];
 
@@ -40,6 +49,9 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
   bool _hasTested = false;
   bool _isDirty = false;
 
+  bool get _isDesktop =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
   @override
   void initState() {
     super.initState();
@@ -49,6 +61,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     _testTextController.text =
         AIExtractPage.sampleAnnouncements.first['text']!;
     _thinkMode = LocalModelManager.enableThinkMode;
+    _useGbnf = AIExtractorService.enableGbnfConstraint;
 
     _promptController.addListener(() {
       if (!_isDirty) setState(() => _isDirty = true);
@@ -62,6 +75,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     _ticker?.cancel();
     _promptController.dispose();
     _testTextController.dispose();
+    _leftScrollController.dispose();
+    _midScrollController.dispose();
+    _rightScrollController.dispose();
+    _singleScrollController.dispose();
     super.dispose();
   }
 
@@ -195,6 +212,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         systemPrompt: prompt,
         modelName: _selectedModel,
         thinkMode: _thinkMode,
+        useGbnf: _useGbnf,
         onProgress: ({stepLog, token, tokenCount}) {
           if (!mounted) return;
           setState(() {
@@ -241,70 +259,342 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     );
   }
 
+  Future<void> _showGbnfInspectorDialog() async {
+    final gbnfController = TextEditingController(
+      text: AIExtractorService.activeGbnfGrammar,
+    );
+    final screenWidth = MediaQuery.of(context).size.width;
+    final dialogWidth = math.min(640.0, screenWidth - 40.0);
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.rule_folder_outlined, color: Color(0xFF10B981)),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'GBNF (GGML BNF) 强制语法规则',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: dialogWidth,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '在 Token 采样阶段将不符合该 BNF 产生式的候选词概率置为 -∞，从根源杜绝非法键名、Markdown 包裹、类型错误与截断未闭合。',
+                style: TextStyle(fontSize: 12, height: 1.4),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: gbnfController,
+                maxLines: 14,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11.5,
+                  height: 1.4,
+                ),
+                decoration: InputDecoration(
+                  filled: true,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              gbnfController.text =
+                  AIExtractorService.defaultAgendaGbnfGrammar.trim();
+            },
+            child: const Text('恢复默认 GBNF'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final next = gbnfController.text.trim();
+              AIExtractorService.customGbnfGrammar =
+                  (next.isEmpty ||
+                          next ==
+                              AIExtractorService.defaultAgendaGbnfGrammar
+                                  .trim())
+                      ? null
+                      : next;
+              Navigator.pop(ctx);
+              _showSnack('✅ GBNF 语法产生式已更新生效');
+            },
+            child: const Text('应用规则'),
+          ),
+        ],
+      ),
+    );
+    gbnfController.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final primaryColor =
         isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB);
 
-    return Scaffold(
-      body: NestedScrollView(
-        headerSliverBuilder: (context, innerBoxIsScrolled) => [
-          SliverAppBar(
-            titleSpacing: 0,
-            floating: true,
-            snap: true,
-            pinned: false,
-            title: const Text(
-              '系统提示词修改与测试',
-              style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-            ),
-            actions: [
-              FilledButton.icon(
+    // 桌面端快捷键映射 (Ctrl+S 保存，Ctrl+Enter 运行测试)
+    final shortcuts = <ShortcutActivator, VoidCallback>{
+      const SingleActivator(LogicalKeyboardKey.keyS, control: true): _savePrompt,
+      const SingleActivator(LogicalKeyboardKey.keyS, meta: true): _savePrompt,
+      const SingleActivator(LogicalKeyboardKey.enter, control: true): () {
+        if (!_isTesting) _runPromptTest();
+      },
+      const SingleActivator(LogicalKeyboardKey.enter, meta: true): () {
+        if (!_isTesting) _runPromptTest();
+      },
+    };
+
+    return CallbackShortcuts(
+      bindings: shortcuts,
+      child: Scaffold(
+        appBar: AppBar(
+          titleSpacing: 12,
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    '系统提示词修改与测试',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  if (_isDirty) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: const Color(0xFFF59E0B)),
+                      ),
+                      child: const Text(
+                        '未保存*',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Color(0xFFF59E0B),
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              Text(
+                '实时调试 System / User Prompt 与 GBNF 语法约束',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: isDark
+                      ? const Color(0xFF94A3B8)
+                      : const Color(0xFF64748B),
+                  fontWeight: FontWeight.normal,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            if (_isDesktop) ...[
+              Tooltip(
+                message: '快捷键: Ctrl + Enter (Mac: Cmd + Enter)',
+                child: FilledButton.tonalIcon(
+                  onPressed: _isTesting ? null : _runPromptTest,
+                  icon: _isTesting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.play_arrow_rounded, size: 16),
+                  label: const Text('运行测试'),
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Tooltip(
+              message: _isDesktop ? '快捷键: Ctrl + S (Mac: Cmd + S)' : '保存提示词',
+              child: FilledButton.icon(
                 onPressed: _savePrompt,
                 icon: const Icon(Icons.save, size: 16),
                 label: Text(_isDirty ? '保存修改*' : '已保存'),
               ),
-              const SizedBox(width: 12),
-            ],
-          ),
-        ],
+            ),
+            const SizedBox(width: 12),
+          ],
+        ),
         body: LayoutBuilder(
           builder: (context, constraints) {
-            final isWide = constraints.maxWidth >= 840;
-            if (isWide) {
+            final width = constraints.maxWidth;
+            final height = constraints.maxHeight;
+
+            // 1. 超宽比例 / 极宽屏 (21:9, 大屏 16:9, width >= 1320)
+            // 采用三栏 Playground: [Prompt编辑] | [测试样本与控制] | [推理终端与诊断]
+            if (width >= 1320) {
+              return Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1800),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 第一栏：System Prompt 编辑器
+                      Expanded(
+                        flex: 38,
+                        child: Scrollbar(
+                          controller: _leftScrollController,
+                          thumbVisibility: true,
+                          child: SingleChildScrollView(
+                            controller: _leftScrollController,
+                            padding: const EdgeInsets.all(16),
+                            child: _buildPromptCard(
+                              isDark,
+                              primaryColor,
+                              isThreeCol: true,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const VerticalDivider(width: 1, thickness: 1),
+                      // 第二栏：User Prompt 待测文本与控制面板
+                      Expanded(
+                        flex: 32,
+                        child: Scrollbar(
+                          controller: _midScrollController,
+                          thumbVisibility: true,
+                          child: SingleChildScrollView(
+                            controller: _midScrollController,
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _buildUserPromptCard(
+                                  isDark,
+                                  primaryColor,
+                                  isThreeCol: true,
+                                ),
+                                const SizedBox(height: 14),
+                                _buildRunControlsCard(isDark, primaryColor),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const VerticalDivider(width: 1, thickness: 1),
+                      // 第三栏：推理终端实况、JSON诊断与提取结果
+                      Expanded(
+                        flex: 42,
+                        child: Scrollbar(
+                          controller: _rightScrollController,
+                          thumbVisibility: true,
+                          child: SingleChildScrollView(
+                            controller: _rightScrollController,
+                            padding: const EdgeInsets.all(16),
+                            child: _buildOutputDiagnosticSection(
+                              isDark,
+                              primaryColor,
+                              terminalMaxHeight:
+                                  (height - 180).clamp(340.0, 560.0),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            // 2. 标准桌面 / 笔记本 (860 <= width < 1320, 16:9 / 16:10 / 3:2)
+            // 采用经典双栏工作台: [输入与配置栏] | [输出实况与诊断栏]
+            else if (width >= 860) {
               return Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
                     flex: 5,
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: _buildInputEditorSection(isDark, primaryColor),
+                    child: Scrollbar(
+                      controller: _leftScrollController,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _leftScrollController,
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildPromptCard(isDark, primaryColor),
+                            const SizedBox(height: 14),
+                            _buildUserPromptCard(isDark, primaryColor),
+                            const SizedBox(height: 14),
+                            _buildRunControlsCard(isDark, primaryColor),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                   const VerticalDivider(width: 1, thickness: 1),
                   Expanded(
                     flex: 6,
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child:
-                          _buildOutputDiagnosticSection(isDark, primaryColor),
+                    child: Scrollbar(
+                      controller: _rightScrollController,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _rightScrollController,
+                        padding: const EdgeInsets.all(16),
+                        child: _buildOutputDiagnosticSection(
+                          isDark,
+                          primaryColor,
+                          terminalMaxHeight:
+                              (height - 200).clamp(340.0, 560.0),
+                        ),
+                      ),
                     ),
                   ),
                 ],
               );
-            } else {
-              return SingleChildScrollView(
-                padding: const EdgeInsets.all(14),
-                child: Column(
-                  children: [
-                    _buildInputEditorSection(isDark, primaryColor),
-                    const SizedBox(height: 16),
-                    const Divider(),
-                    const SizedBox(height: 12),
-                    _buildOutputDiagnosticSection(isDark, primaryColor),
-                  ],
+            }
+
+            // 3. 紧凑屏幕 / 窄分屏 / 移动端 (width < 860)
+            // 采用单列顺畅纵向流式排布
+            else {
+              return Scrollbar(
+                controller: _singleScrollController,
+                child: SingleChildScrollView(
+                  controller: _singleScrollController,
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildPromptCard(isDark, primaryColor),
+                      const SizedBox(height: 12),
+                      _buildUserPromptCard(isDark, primaryColor),
+                      const SizedBox(height: 12),
+                      _buildRunControlsCard(isDark, primaryColor),
+                      const SizedBox(height: 16),
+                      const Divider(),
+                      const SizedBox(height: 12),
+                      _buildOutputDiagnosticSection(
+                        isDark,
+                        primaryColor,
+                        terminalMaxHeight: 340,
+                      ),
+                    ],
+                  ),
                 ),
               );
             }
@@ -314,43 +604,47 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     );
   }
 
-  /// 构建左侧/上方的系统提示词与输入编辑器区域
-  Widget _buildInputEditorSection(bool isDark, Color primaryColor) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 1. 系统提示词卡片
-        Card(
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: BorderSide(
-              color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
-            ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+  /// 1. 构建 System Prompt 编辑卡片
+  Widget _buildPromptCard(
+    bool isDark,
+    Color primaryColor, {
+    bool isThreeCol = false,
+  }) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 6,
               children: [
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  runSpacing: 4,
+                Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.terminal, color: primaryColor, size: 18),
-                        const SizedBox(width: 6),
-                        const Text(
-                          'System Prompt (系统指令模板)',
-                          style: TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.bold),
-                        ),
-                      ],
+                    Icon(Icons.terminal, color: primaryColor, size: 18),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'System Prompt (系统指令模板)',
+                      style:
+                          TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                     ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
                     ActionChip(
                       visualDensity: VisualDensity.compact,
                       avatar: const Icon(Icons.add, size: 14),
@@ -359,287 +653,406 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                       tooltip: '在光标处插入动态时间锚点占位符',
                       onPressed: _insertTimeAnchorMacro,
                     ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '说明：用于约束大模型输出严格的 JSON Schema 结构。支持使用 {TIME_ANCHOR} 宏自动注入换算相对时间的系统时间锚点。',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color:
-                        isDark ? const Color(0xFF94A3B8) : Colors.grey.shade600,
-                    height: 1.4,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _promptController,
-                  maxLines: 12,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    height: 1.45,
-                  ),
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: isDark
-                        ? const Color(0xFF0F172A)
-                        : const Color(0xFFF8FAFC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(
-                        color: isDark
-                            ? const Color(0xFF334155)
-                            : const Color(0xFFCBD5E1),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
                     OutlinedButton.icon(
                       onPressed: _resetToDefault,
-                      icon: const Icon(Icons.restart_alt, size: 15),
+                      icon: const Icon(Icons.restart_alt, size: 14),
                       label:
-                          const Text('恢复默认提示词', style: TextStyle(fontSize: 12)),
+                          const Text('恢复默认', style: TextStyle(fontSize: 11.5)),
                       style: OutlinedButton.styleFrom(
                         visualDensity: VisualDensity.compact,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                      ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${_promptController.text.length} 字符',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: isDark
-                            ? const Color(0xFF64748B)
-                            : Colors.grey.shade500,
+                            horizontal: 8, vertical: 4),
                       ),
                     ),
                   ],
                 ),
               ],
             ),
-          ),
-        ),
-
-        const SizedBox(height: 14),
-
-        // 2. 测试输入通知文本卡片
-        Card(
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: BorderSide(
-              color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+            const SizedBox(height: 6),
+            Text(
+              '说明：用于约束模型生成严格的 events 结构化日程。可插入 {TIME_ANCHOR} 宏自动注入当前系统时间供模型换算“明天/下周”。',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: isDark ? const Color(0xFF94A3B8) : Colors.grey.shade600,
+                height: 1.4,
+              ),
             ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            const SizedBox(height: 10),
+            TextField(
+              controller: _promptController,
+              maxLines: isThreeCol ? 16 : 11,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                height: 1.45,
+              ),
+              decoration: InputDecoration(
+                filled: true,
+                fillColor: isDark
+                    ? const Color(0xFF0F172A)
+                    : const Color(0xFFF8FAFC),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: isDark
+                        ? const Color(0xFF334155)
+                        : const Color(0xFFCBD5E1),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.description_outlined,
-                            color: primaryColor, size: 18),
-                        const SizedBox(width: 6),
-                        const Text(
-                          'User Prompt (测试杂乱通知)',
-                          style: TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        PopupMenuButton<int>(
-                          tooltip: '填入典型测试通知示例',
-                          icon: const Icon(Icons.smart_display_outlined, size: 18),
-                          onSelected: (idx) {
-                            final sample =
-                                AIExtractPage.sampleAnnouncements[idx];
-                            _testTextController.text = sample['text']!;
-                          },
-                          itemBuilder: (context) => [
-                            for (int i = 0;
-                                i < AIExtractPage.sampleAnnouncements.length;
-                                i++)
-                              PopupMenuItem(
-                                value: i,
-                                child: Text(
-                                  AIExtractPage.sampleAnnouncements[i]['label']!,
-                                  style: const TextStyle(fontSize: 12.5),
-                                ),
-                              ),
-                          ],
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          tooltip: '从剪贴板粘贴',
-                          icon: const Icon(Icons.paste, size: 18),
-                          onPressed: () async {
-                            final data =
-                                await Clipboard.getData(Clipboard.kTextPlain);
-                            if (data?.text != null && data!.text!.isNotEmpty) {
-                              _testTextController.text = data.text!;
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _testTextController,
-                  maxLines: 5,
-                  decoration: InputDecoration(
-                    hintText: '输入或粘贴用于测试的群通知、调课或会议通知...',
-                    filled: true,
-                    fillColor: isDark
-                        ? const Color(0xFF0F172A)
-                        : const Color(0xFFF8FAFC),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(
-                        color: isDark
-                            ? const Color(0xFF334155)
-                            : const Color(0xFFCBD5E1),
-                      ),
-                    ),
+                Text(
+                  '${_promptController.text.length} 字符',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isDark
+                        ? const Color(0xFF64748B)
+                        : Colors.grey.shade500,
                   ),
                 ),
               ],
             ),
-          ),
+          ],
         ),
+      ),
+    );
+  }
 
-        const SizedBox(height: 14),
-
-        // 3. 运行控制卡片
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color:
-                  isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-            ),
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.memory, size: 18),
-                  const SizedBox(width: 8),
-                  const Text('选择模型:',
+  /// 2. 构建 User Prompt 测试样本卡片
+  Widget _buildUserPromptCard(
+    bool isDark,
+    Color primaryColor, {
+    bool isThreeCol = false,
+  }) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.description_outlined,
+                        color: primaryColor, size: 18),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'User Prompt (待测通知文本)',
                       style:
-                          TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        value: _selectedModel,
-                        isDense: true,
-                        isExpanded: true,
-                        hint: const Text('未检测到本地模型'),
-                        items: _availableModels.map((m) {
-                          return DropdownMenuItem(
-                            value: m,
-                            child: Text(m,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 12.5)),
-                          );
-                        }).toList(),
-                        onChanged: (val) {
-                          if (val != null) setState(() => _selectedModel = val);
-                        },
-                      ),
+                          TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                     ),
-                  ),
-                ],
-              ),
-              const Divider(height: 14),
-              Row(
-                children: [
-                  const Icon(Icons.psychology_outlined, size: 18),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('深度思考 (Think Mode)',
-                            style: TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.bold)),
-                        Text('输出思维链。关掉则强制直出纯 JSON',
-                            style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  ],
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    PopupMenuButton<int>(
+                      tooltip: '填入典型测试通知示例',
+                      icon: const Icon(Icons.smart_display_outlined, size: 18),
+                      onSelected: (idx) {
+                        final sample =
+                            AIExtractPage.sampleAnnouncements[idx];
+                        _testTextController.text = sample['text']!;
+                      },
+                      itemBuilder: (context) => [
+                        for (int i = 0;
+                            i < AIExtractPage.sampleAnnouncements.length;
+                            i++)
+                          PopupMenuItem(
+                            value: i,
+                            child: Text(
+                              AIExtractPage.sampleAnnouncements[i]['label']!,
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
+                          ),
                       ],
                     ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: '从剪贴板粘贴',
+                      icon: const Icon(Icons.paste, size: 18),
+                      onPressed: () async {
+                        final data =
+                            await Clipboard.getData(Clipboard.kTextPlain);
+                        if (data?.text != null && data!.text!.isNotEmpty) {
+                          _testTextController.text = data.text!;
+                        }
+                      },
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: '清空文本',
+                      icon: const Icon(Icons.clear_all, size: 18),
+                      onPressed: () {
+                        _testTextController.clear();
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _testTextController,
+              maxLines: isThreeCol ? 6 : 5,
+              decoration: InputDecoration(
+                hintText: '输入或粘贴用于测试的群通知、调课或会议通知...',
+                filled: true,
+                fillColor: isDark
+                    ? const Color(0xFF0F172A)
+                    : const Color(0xFFF8FAFC),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: isDark
+                        ? const Color(0xFF334155)
+                        : const Color(0xFFCBD5E1),
                   ),
-                  Switch(
-                    value: _thinkMode,
-                    onChanged: (val) => setState(() => _thinkMode = val),
-                  ),
-                ],
+                ),
               ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                height: 44,
-                child: FilledButton.icon(
-                  onPressed: _isTesting ? null : _runPromptTest,
-                  icon: _isTesting
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(Icons.play_arrow_rounded),
-                  label: Text(_isTesting ? '正在调用大模型推理测试...' : '🚀 运行提示词推理测试'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 3. 构建运行控制与参数配置卡片
+  Widget _buildRunControlsCard(bool isDark, Color primaryColor) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color:
+              isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+        ),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.memory, size: 18),
+              const SizedBox(width: 8),
+              const Text('选择模型:',
+                  style:
+                      TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: _selectedModel,
+                    isDense: true,
+                    isExpanded: true,
+                    hint: const Text('未检测到本地模型'),
+                    items: _availableModels.map((m) {
+                      return DropdownMenuItem(
+                        value: m,
+                        child: Text(m,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12.5)),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) setState(() => _selectedModel = val);
+                    },
+                  ),
                 ),
               ),
             ],
           ),
-        ),
-      ],
+          const Divider(height: 14),
+          Row(
+            children: [
+              const Icon(Icons.psychology_outlined, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('深度思考 (Think Mode)',
+                        style: TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.bold)),
+                    Text('输出思维链。关掉则强制直出纯 JSON',
+                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                  ],
+                ),
+              ),
+              Switch(
+                value: _thinkMode,
+                onChanged: (val) => setState(() => _thinkMode = val),
+              ),
+            ],
+          ),
+          const Divider(height: 14),
+          Row(
+            children: [
+              const Icon(Icons.verified_user_outlined,
+                  size: 18, color: Color(0xFF10B981)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Text('GBNF 强制语法约束',
+                            style: TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 6),
+                        InkWell(
+                          onTap: _showGbnfInspectorDialog,
+                          borderRadius: BorderRadius.circular(4),
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 4, vertical: 2),
+                            child: Text(
+                              '查看/编辑 GBNF',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF2563EB),
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      '在采样层强制锁定 events 结构与 ISO-8601 时间格式',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: _useGbnf,
+                onChanged: (val) {
+                  setState(() {
+                    _useGbnf = val;
+                    AIExtractorService.enableGbnfConstraint = val;
+                  });
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            height: 44,
+            child: FilledButton.icon(
+              onPressed: _isTesting ? null : _runPromptTest,
+              icon: _isTesting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.play_arrow_rounded),
+              label: Text(_isTesting
+                  ? '正在调用大模型推理测试...'
+                  : _isDesktop
+                      ? '🚀 运行提示词推理测试 (Ctrl+Enter)'
+                      : '🚀 运行提示词推理测试'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  /// 构建右侧/下方的端侧推理实况与 JSON 格式诊断输出区域
-  Widget _buildOutputDiagnosticSection(bool isDark, Color primaryColor) {
+  /// 4. 构建右侧/下方的推理实况终端与格式诊断输出区域
+  Widget _buildOutputDiagnosticSection(
+    bool isDark,
+    Color primaryColor, {
+    required double terminalMaxHeight,
+  }) {
+    final hasTerminalContent =
+        _processLogs.isNotEmpty || _tokenBuffer.isNotEmpty || _isTesting;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 1. 端侧推理实况终端（直接复用 InferenceTerminal，传入更大的 maxHeight: 360）
-        InferenceTerminal(
-          isExtracting: _isTesting,
-          processLogs: _processLogs,
-          streamedTokens: _tokenBuffer.toString(),
-          tokenCount: _tokenCount,
-          elapsedSeconds: _elapsedSeconds,
-          maxHeight: 360, // 调试模式下提供更大的视窗
-          initialExpanded: true,
-        ),
+        // 尚未执行测试时的优雅引导占位卡片
+        if (!hasTerminalContent && !_hasTested) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color:
+                    isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+              ),
+            ),
+            child: Column(
+              children: [
+                Icon(
+                  Icons.developer_board_outlined,
+                  size: 48,
+                  color: primaryColor.withValues(alpha: 0.8),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '端侧推理实况与 JSON 诊断就绪',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '在左侧配置好系统提示词、待测通知文本与模型参数后，点击「运行提示词推理测试」或按 Ctrl+Enter，即可在此处全屏/分屏实时观测 Token 流式生成、语法诊断与日程草稿提取效果。',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDark
+                        ? const Color(0xFF94A3B8)
+                        : Colors.grey.shade600,
+                    height: 1.45,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // 1. 端侧推理实况终端（自适应高度）
+        if (hasTerminalContent) ...[
+          InferenceTerminal(
+            isExtracting: _isTesting,
+            processLogs: _processLogs,
+            streamedTokens: _tokenBuffer.toString(),
+            tokenCount: _tokenCount,
+            elapsedSeconds: _elapsedSeconds,
+            maxHeight: terminalMaxHeight,
+            initialExpanded: true,
+          ),
+        ],
 
         // 2. JSON 结构化诊断卡片
         if (_hasTested) ...[
-          const SizedBox(height: 6),
+          const SizedBox(height: 4),
           _buildDiagnosticCard(isDark),
           const SizedBox(height: 12),
         ],
@@ -665,13 +1078,13 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                     spacing: 8,
                     runSpacing: 4,
                     children: [
-                      Row(
+                      const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.data_object,
+                          Icon(Icons.data_object,
                               size: 16, color: Color(0xFF10B981)),
-                          const SizedBox(width: 6),
-                          const Text(
+                          SizedBox(width: 6),
+                          Text(
                             '模型生成原始全文 (Raw Output)',
                             style: TextStyle(
                                 fontSize: 13, fontWeight: FontWeight.bold),
@@ -704,7 +1117,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                             : const Color(0xFFE2E8F0),
                       ),
                     ),
-                    constraints: const BoxConstraints(maxHeight: 180),
+                    constraints: const BoxConstraints(maxHeight: 200),
                     child: SingleChildScrollView(
                       child: SelectableText(
                         _rawOutput,
@@ -743,10 +1156,20 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               padding: const EdgeInsets.only(bottom: 8),
               child: AgendaEventCard(
                 event: event,
+                showDate: true,
                 isDraft: true,
                 onDelete: () {
                   setState(() {
                     _parsedEvents.removeWhere((e) => e.id == event.id);
+                  });
+                },
+                onEventChanged: (updated) {
+                  setState(() {
+                    final idx =
+                        _parsedEvents.indexWhere((e) => e.id == updated.id);
+                    if (idx >= 0) {
+                      _parsedEvents[idx] = updated;
+                    }
                   });
                 },
               ),
@@ -756,7 +1179,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     );
   }
 
-  /// 构建 JSON 格式与有效性诊断状态卡片
+  /// 5. 构建 JSON 格式与有效性诊断状态卡片
   Widget _buildDiagnosticCard(bool isDark) {
     final hasEvents = _parsedEvents.isNotEmpty;
     final hasError = _diagnosticError != null;
@@ -812,7 +1235,8 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               '诊断详情: $_diagnosticError',
               style: TextStyle(
                 fontSize: 11.5,
-                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF334155),
+                color:
+                    isDark ? const Color(0xFFE2E8F0) : const Color(0xFF334155),
                 height: 1.4,
               ),
             ),

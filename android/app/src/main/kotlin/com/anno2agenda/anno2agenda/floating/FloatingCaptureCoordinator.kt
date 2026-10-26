@@ -68,7 +68,7 @@ class FloatingCaptureCoordinator(private val context: Context) {
                         )
                     )
                 }
-            }, 100)
+            }, 180)
         } else {
             val text = try {
                 a11y.extractCurrentScreenText().trim()

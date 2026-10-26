@@ -48,6 +48,117 @@ class AIExtractorService {
   /// 全局共享的当前推理接口地址（供悬浮窗后台调用对齐主程序配置）
   static String currentLlmEndpoint = 'http://127.0.0.1:11434/api/generate';
 
+  /// 是否启用 GBNF (GGML BNF) 强制语法约束（默认开启，在采样层屏蔽一切非规范 Token）
+  static bool enableGbnfConstraint = true;
+
+  /// 标准日程提取 GBNF (GGML BNF) 语法规则（约束顶层 {"events":[...]}、字段顺序、类型及 ISO-8601 时间格式）
+  static const String defaultAgendaGbnfGrammar = r'''
+root ::= ws "{" ws "\"events\"" ws ":" ws "[" ws (event-list)? ws "]" ws "}" ws
+event-list ::= event-item (ws "," ws event-item)*
+event-item ::= "{" ws
+  "\"title\"" ws ":" ws non-empty-string ws "," ws
+  "\"startTime\"" ws ":" ws iso-datetime ws "," ws
+  "\"endTime\"" ws ":" ws iso-datetime ws "," ws
+  "\"location\"" ws ":" ws string ws "," ws
+  "\"description\"" ws ":" ws string ws "," ws
+  "\"checklist\"" ws ":" ws string-array ws "," ws
+  "\"reminderMinutes\"" ws ":" ws integer ws "," ws
+  "\"confidence\"" ws ":" ws confidence-num ws
+"}"
+string-array ::= "[" ws (string (ws "," ws string)*)? ws "]"
+iso-datetime ::= "\"" date "T" time "\""
+date ::= [0-9]{4} "-" ("0" [1-9] | "1" [0-2]) "-" ("0" [1-9] | [1-2] [0-9] | "3" [0-1])
+time ::= ([01] [0-9] | "2" [0-3]) ":" [0-5] [0-9] (":" [0-5] [0-9])?
+integer ::= [0] | [1-9] [0-9]{0,3}
+confidence-num ::= "0" ("." [0-9]{1,2})? | "1" (".0" | ".00")?
+non-empty-string ::= "\"" char+ "\""
+string ::= "\"" char* "\""
+char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= | " " | "\n"{1,2} [ \t]{0,16}
+''';
+
+  /// 适配 Android 免思考模式预填充 `{"events":[` 后的续写 GBNF 语法规则（严禁重复输出前缀且强制闭合 `]}`）
+  static const String prefilledAgendaGbnfGrammar = r'''
+root ::= ws (event-list)? ws "]" ws "}" ws
+event-list ::= event-item (ws "," ws event-item)*
+event-item ::= "{" ws
+  "\"title\"" ws ":" ws non-empty-string ws "," ws
+  "\"startTime\"" ws ":" ws iso-datetime ws "," ws
+  "\"endTime\"" ws ":" ws iso-datetime ws "," ws
+  "\"location\"" ws ":" ws string ws "," ws
+  "\"description\"" ws ":" ws string ws "," ws
+  "\"checklist\"" ws ":" ws string-array ws "," ws
+  "\"reminderMinutes\"" ws ":" ws integer ws "," ws
+  "\"confidence\"" ws ":" ws confidence-num ws
+"}"
+string-array ::= "[" ws (string (ws "," ws string)*)? ws "]"
+iso-datetime ::= "\"" date "T" time "\""
+date ::= [0-9]{4} "-" ("0" [1-9] | "1" [0-2]) "-" ("0" [1-9] | [1-2] [0-9] | "3" [0-1])
+time ::= ([01] [0-9] | "2" [0-3]) ":" [0-5] [0-9] (":" [0-5] [0-9])?
+integer ::= [0] | [1-9] [0-9]{0,3}
+confidence-num ::= "0" ("." [0-9]{1,2})? | "1" (".0" | ".00")?
+non-empty-string ::= "\"" char+ "\""
+string ::= "\"" char* "\""
+char ::= [^"\\\x7F\x00-\x1F] | [\\] (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= | " " | "\n"{1,2} [ \t]{0,16}
+''';
+
+  /// 与 GBNF 对齐的严格 JSON Schema（供 Ollama / llama-server 底层通过 json_schema_to_grammar 编译为 GBNF 采样器）
+  static const Map<String, dynamic> agendaJsonSchema = {
+    'type': 'object',
+    'required': ['events'],
+    'additionalProperties': false,
+    'properties': {
+      'events': {
+        'type': 'array',
+        'items': {
+          'type': 'object',
+          'required': [
+            'title',
+            'startTime',
+            'endTime',
+            'location',
+            'description',
+            'checklist',
+            'reminderMinutes',
+            'confidence',
+          ],
+          'additionalProperties': false,
+          'properties': {
+            'title': {'type': 'string', 'minLength': 1},
+            'startTime': {
+              'type': 'string',
+              'pattern':
+                  r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$',
+            },
+            'endTime': {
+              'type': 'string',
+              'pattern':
+                  r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$',
+            },
+            'location': {'type': 'string'},
+            'description': {'type': 'string'},
+            'checklist': {
+              'type': 'array',
+              'items': {'type': 'string'},
+            },
+            'reminderMinutes': {'type': 'integer', 'minimum': 0, 'maximum': 10080},
+            'confidence': {'type': 'number', 'minimum': 0.0, 'maximum': 1.0},
+          },
+        },
+      },
+    },
+  };
+
+  /// 用户自定义配置的 GBNF 语法规则（若为 null 则使用 defaultAgendaGbnfGrammar）
+  static String? customGbnfGrammar;
+
+  /// 获取当前生效的 GBNF 语法字符串
+  static String get activeGbnfGrammar =>
+      (customGbnfGrammar != null && customGbnfGrammar!.trim().isNotEmpty)
+          ? customGbnfGrammar!.trim()
+          : defaultAgendaGbnfGrammar.trim();
+
   /// 默认标准系统提示词模板（支持 {TIME_ANCHOR} 宏替换）
   static const String defaultSystemPromptTemplate = '''你是一个运行在端侧设备的高校通知日程提取助手。
 【当前系统时间锚点】：{TIME_ANCHOR}
@@ -151,6 +262,7 @@ class AIExtractorService {
     String llmEndpoint = 'http://127.0.0.1:11434/api/generate',
     String? llmModelName,
     bool? thinkMode,
+    bool? useGbnf,
     String? customSystemPrompt,
     ExtractionProgressCallback? onProgress,
   }) async {
@@ -159,6 +271,7 @@ class AIExtractorService {
     final prompt = buildSystemPrompt(now, customSystemPrompt);
     final deviceOrigin = Platform.isAndroid ? 'android' : 'windows';
     final effectiveThink = thinkMode ?? LocalModelManager.enableThinkMode;
+    final effectiveGbnf = useGbnf ?? enableGbnfConstraint;
 
     final dateStr =
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
@@ -187,6 +300,11 @@ class AIExtractorService {
             onProgress?.call(
               stepLog: '[路由] 激活端侧模型引擎: $targetModel (llama.cpp ARM64/Vulkan)',
             );
+            if (effectiveGbnf) {
+              onProgress?.call(
+                stepLog: '[语法约束] 已挂载 GBNF (GGML BNF) 采样状态机，强制锁定 JSON 语法与 ISO-8601 字段',
+              );
+            }
             if (effectiveThink) {
               onProgress?.call(stepLog: '[模式] 开启深度思考 (Think Mode)，模型正在输出思维链...');
             } else {
@@ -198,6 +316,11 @@ class AIExtractorService {
               userPrompt: rawText,
               preferredModelId: targetModel,
               thinkMode: effectiveThink,
+              gbnfGrammar: effectiveGbnf
+                  ? (effectiveThink
+                      ? activeGbnfGrammar
+                      : prefilledAgendaGbnfGrammar.trim())
+                  : null,
               onToken: (tok) {
                 tokenCounter++;
                 onProgress?.call(token: tok, tokenCount: tokenCounter);
@@ -205,7 +328,7 @@ class AIExtractorService {
             );
 
             if (rawJson != null && rawJson.isNotEmpty) {
-              onProgress?.call(stepLog: '[后处理] 解析并校验 JSON 实体有效性...');
+              onProgress?.call(stepLog: '[后处理] 解析并校验 GBNF / JSON 实体有效性...');
               final androidEvents = _parseEventsFromRawJsonString(
                 rawJson: rawJson,
                 rawText: rawText,
@@ -220,9 +343,10 @@ class AIExtractorService {
                 return ExtractionResult(
                   events: androidEvents,
                   engineUsed:
-                      'Android 端侧大模型 ($targetModel · llama.cpp${effectiveThink ? " · 深度思考" : ""})',
+                      'Android 端侧大模型 ($targetModel · llama.cpp${effectiveGbnf ? " · GBNF" : ""}${effectiveThink ? " · 深度思考" : ""})',
                   elapsedMs: sw.elapsedMilliseconds,
                   promptPreview: prompt,
+                  rawResponse: rawJson,
                 );
               }
             }
@@ -231,6 +355,11 @@ class AIExtractorService {
 
         // 2. Windows 桌面端 或 局域网桌面算力协同接口 (/extract)
         onProgress?.call(stepLog: '[路由] 连接本地/局域网推理服务: $targetModel');
+        if (effectiveGbnf && !llmEndpoint.endsWith('/extract')) {
+          onProgress?.call(
+            stepLog: '[语法约束] 已启用 GBNF / Structured JSON Schema 强制采样约束',
+          );
+        }
         final llmEvents = await _tryCallLocalLlm(
           rawText: rawText,
           systemPrompt: prompt,
@@ -239,6 +368,7 @@ class AIExtractorService {
           endpoint: llmEndpoint,
           modelName: targetModel,
           thinkMode: effectiveThink,
+          useGbnf: effectiveGbnf,
           onToken: (tok) {
             tokenCounter++;
             onProgress?.call(token: tok, tokenCount: tokenCounter);
@@ -251,7 +381,8 @@ class AIExtractorService {
           );
           return ExtractionResult(
             events: llmEvents,
-            engineUsed: '端侧大模型 ($targetModel${effectiveThink ? " · 深度思考" : ""})',
+            engineUsed:
+                '端侧大模型 ($targetModel${effectiveGbnf ? " · GBNF" : ""}${effectiveThink ? " · 深度思考" : ""})',
             elapsedMs: sw.elapsedMilliseconds,
             promptPreview: prompt,
           );
@@ -285,7 +416,36 @@ class AIExtractorService {
     );
   }
 
-  /// 调用本地推理服务或局域网桌面算力节点
+  /// 构建带 GBNF 语法规则与 JSON Schema 结构化约束的推理请求载荷
+  static Map<String, dynamic> _buildLlmRequestBody({
+    required String modelName,
+    required String systemPrompt,
+    required String userPrompt,
+    required bool streamMode,
+    required bool thinkMode,
+    required bool useGbnf,
+    bool fallbackBasicJsonFormat = false,
+  }) {
+    final useStrictSchema = useGbnf && !fallbackBasicJsonFormat;
+    return {
+      'model': modelName,
+      'system': systemPrompt,
+      'prompt': userPrompt,
+      'stream': streamMode,
+      'think': thinkMode,
+      // Ollama 0.5+ 将 JSON Schema 对象通过内置 llama.cpp 编译为 GBNF 采样器；回退模式下使用通用 'json'
+      'format': useStrictSchema ? agendaJsonSchema : 'json',
+      // 兼容原生 llama-server / llama.cpp HTTP 接口直接读取 GBNF grammar 字段
+      if (useStrictSchema) 'grammar': activeGbnfGrammar,
+      'options': {
+        'temperature': 0.1,
+        'top_p': 0.85,
+        'repeat_penalty': 1.05,
+      },
+    };
+  }
+
+  /// 调用本地推理服务或局域网桌面算力节点（支持 GBNF / JSON Schema 强约束与旧版运行时自动回退）
   static Future<List<AgendaEvent>> _tryCallLocalLlm({
     required String rawText,
     required String systemPrompt,
@@ -294,6 +454,7 @@ class AIExtractorService {
     required String endpoint,
     required String modelName,
     bool thinkMode = false,
+    bool useGbnf = true,
     void Function(String token)? onToken,
   }) async {
     final client = LocalModelManager.createDirectHttpClient(
@@ -301,28 +462,37 @@ class AIExtractorService {
     );
     try {
       final uri = Uri.parse(endpoint);
-      final req = await client.postUrl(uri);
-      req.headers.contentType = ContentType('application', 'json', charset: 'utf-8');
-
       final isExtractApi = uri.path.endsWith('/extract');
       final bool streamMode = (!isExtractApi && onToken != null);
 
-      final Map<String, dynamic> body;
-      if (isExtractApi) {
-        body = {'text': rawText, 'sourceType': sourceType};
-      } else {
-        body = {
-          'model': modelName,
-          'system': systemPrompt,
-          'prompt': rawText,
-          'stream': streamMode,
-          'think': thinkMode,
-          'format': 'json',
-        };
+      Future<HttpClientResponse> sendRequest({bool fallbackFormat = false}) async {
+        final req = await client.postUrl(uri);
+        req.headers.contentType =
+            ContentType('application', 'json', charset: 'utf-8');
+        final Map<String, dynamic> body;
+        if (isExtractApi) {
+          body = {'text': rawText, 'sourceType': sourceType};
+        } else {
+          body = _buildLlmRequestBody(
+            modelName: modelName,
+            systemPrompt: systemPrompt,
+            userPrompt: rawText,
+            streamMode: streamMode,
+            thinkMode: thinkMode,
+            useGbnf: useGbnf,
+            fallbackBasicJsonFormat: fallbackFormat,
+          );
+        }
+        req.add(utf8.encode(jsonEncode(body)));
+        return req.close().timeout(Duration(seconds: thinkMode ? 70 : 30));
       }
 
-      req.add(utf8.encode(jsonEncode(body)));
-      final resp = await req.close().timeout(Duration(seconds: thinkMode ? 70 : 30));
+      var resp = await sendRequest();
+      // 若旧版服务端不支持 JSON Schema 对象格式返回 400/500，自动无缝降级为 'format': 'json' 重试一次
+      if (resp.statusCode != 200 && !isExtractApi && useGbnf) {
+        await resp.drain();
+        resp = await sendRequest(fallbackFormat: true);
+      }
       if (resp.statusCode != 200) return [];
 
       if (!isExtractApi) {
@@ -331,14 +501,27 @@ class AIExtractorService {
 
       if (streamMode) {
         final fullResponse = StringBuffer();
-        await for (final line in resp.transform(utf8.decoder).transform(const LineSplitter())) {
+        await for (final line in resp
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())) {
           if (line.trim().isEmpty) continue;
           try {
             final parsed = jsonDecode(line);
-            if (parsed is Map && parsed.containsKey('response')) {
-              final tok = parsed['response']?.toString() ?? '';
-              fullResponse.write(tok);
-              onToken(tok);
+            if (parsed is Map) {
+              // 深度思考模式下同时向终端回显 thinking 思维链流，但不混入最终 JSON 缓冲区
+              if (parsed.containsKey('thinking')) {
+                final thinkTok = parsed['thinking']?.toString() ?? '';
+                if (thinkTok.isNotEmpty) {
+                  onToken(thinkTok);
+                }
+              }
+              if (parsed.containsKey('response')) {
+                final tok = parsed['response']?.toString() ?? '';
+                if (tok.isNotEmpty) {
+                  fullResponse.write(tok);
+                  onToken(tok);
+                }
+              }
             }
           } catch (_) {}
         }
@@ -357,7 +540,8 @@ class AIExtractorService {
       // 1. 兼容局域网协同接口返回格式
       if (decoded is Map && decoded['events'] is List) {
         return (decoded['events'] as List)
-            .map((e) => AgendaEvent.fromJson(e as Map<String, dynamic>))
+            .map((e) => AgendaEvent.fromJson(
+                _normalizeEventMapForGbnfSpec(Map<String, dynamic>.from(e as Map))))
             .toList();
       }
 
@@ -373,6 +557,86 @@ class AIExtractorService {
     } finally {
       client.close();
     }
+  }
+
+  /// 对单条事件 Map 进行 GBNF 规范化修补（例如将空格分隔的日期时间修正为标准 ISO-8601 `T` 格式）
+  static Map<String, dynamic> _normalizeEventMapForGbnfSpec(
+      Map<String, dynamic> rawMap) {
+    final map = Map<String, dynamic>.from(rawMap);
+    for (final timeKey in const ['startTime', 'endTime']) {
+      final val = map[timeKey]?.toString().trim();
+      if (val != null && val.isNotEmpty) {
+        var norm = val.replaceAll('/', '-');
+        // 将 "2026-10-25 14:30" 修补为 "2026-10-25T14:30:00"
+        final spaceMatch =
+            RegExp(r'^(\d{4}-\d{1,2}-\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)$')
+                .firstMatch(norm);
+        if (spaceMatch != null) {
+          norm = '${spaceMatch.group(1)}T${spaceMatch.group(2)}';
+        }
+        // 补齐月、日、时前导零及秒位
+        final isoLoose = RegExp(
+                r'^(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{2})(?::(\d{2}))?')
+            .firstMatch(norm);
+        if (isoLoose != null) {
+          final y = isoLoose.group(1)!;
+          final m = isoLoose.group(2)!.padLeft(2, '0');
+          final d = isoLoose.group(3)!.padLeft(2, '0');
+          final hh = isoLoose.group(4)!.padLeft(2, '0');
+          final mm = isoLoose.group(5)!;
+          final ss = isoLoose.group(6) ?? '00';
+          norm = '$y-$m-${d}T$hh:$mm:$ss';
+        }
+        map[timeKey] = norm;
+      }
+    }
+    if (map['checklist'] is String) {
+      final str = (map['checklist'] as String).trim();
+      map['checklist'] = str.isEmpty ? <String>[] : <String>[str];
+    }
+    return map;
+  }
+
+  /// 校验单条事件 JSON Map 是否符合 GBNF 语法与字段规范，返回违规原因（若合规返回 null）
+  static String? validateEventItemAgainstGbnf(Map<String, dynamic> item) {
+    const coreRequiredKeys = [
+      'title',
+      'startTime',
+      'endTime',
+    ];
+    for (final k in coreRequiredKeys) {
+      if (!item.containsKey(k)) {
+        return '违反 GBNF 规则：缺少核心必填字段 "$k"';
+      }
+    }
+    final title = item['title'];
+    if (title is! String || title.trim().isEmpty) {
+      return '违反 GBNF 规则："title" 必须为非空字符串';
+    }
+    final isoReg = RegExp(
+      r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$',
+    );
+    final startStr = item['startTime']?.toString() ?? '';
+    if (!isoReg.hasMatch(startStr)) {
+      return '违反 GBNF 规则："startTime" ($startStr) 不符合严格 ISO-8601 格式';
+    }
+    final endStr = item['endTime']?.toString() ?? '';
+    if (!isoReg.hasMatch(endStr)) {
+      return '违反 GBNF 规则："endTime" ($endStr) 不符合严格 ISO-8601 格式';
+    }
+    if (item.containsKey('checklist') && item['checklist'] is! List) {
+      return '违反 GBNF 规则："checklist" 必须为字符串数组';
+    }
+    if (item.containsKey('reminderMinutes') && item['reminderMinutes'] is! int) {
+      return '违反 GBNF 规则："reminderMinutes" 必须为整数';
+    }
+    if (item.containsKey('confidence')) {
+      final conf = item['confidence'];
+      if (conf is! num || conf < 0.0 || conf > 1.0) {
+        return '违反 GBNF 规则："confidence" 必须为 0.0~1.0 之间的数值';
+      }
+    }
+    return null;
   }
 
   /// 将大模型输出的 JSON 字符串解析为 AgendaEvent 列表（兼容数组、对象与截断修复，绝不因局部格式异常向上抛出导致误触发规则引擎）
@@ -429,7 +693,8 @@ class AIExtractorService {
     for (final item in rawList) {
       if (item is! Map) continue;
       try {
-        final map = Map<String, dynamic>.from(item);
+        final map =
+            _normalizeEventMapForGbnfSpec(Map<String, dynamic>.from(item));
         map['sourceText'] = rawText;
         map['sourceType'] = sourceType;
         map['deviceOrigin'] = deviceOrigin;
@@ -496,16 +761,22 @@ class AIExtractorService {
     return results;
   }
 
-  /// 深度解析大模型返回文本，提取日程对象并捕获格式/JSON 诊断错误
+  /// 深度解析大模型返回文本，提取日程对象并捕获格式/GBNF 语法诊断错误
   static ({List<AgendaEvent> events, String? parseError}) parseAndDiagnoseJson({
     required String rawJson,
     required String rawText,
     String sourceType = 'test',
     String deviceOrigin = 'local',
   }) {
-    final trimmed = rawJson.trim();
+    var trimmed = rawJson.trim();
     if (trimmed.isEmpty) {
       return (events: <AgendaEvent>[], parseError: '大模型返回内容为空');
+    }
+
+    // 若包含 <think>...</think> 思维链块，先剥离思维链再诊断 JSON 正文
+    final thinkEnd = trimmed.indexOf('</think>');
+    if (thinkEnd != -1) {
+      trimmed = trimmed.substring(thinkEnd + '</think>'.length).trim();
     }
 
     dynamic parsedJson;
@@ -526,7 +797,7 @@ class AIExtractorService {
       if (match != null) {
         try {
           parsedJson = jsonDecode(match.group(1)!);
-          lastError = '注意：大模型将 JSON 包裹在 markdown 代码块中';
+          lastError = '注意：大模型将 JSON 包裹在 markdown 代码块中（开启 GBNF 可消除此现象）';
         } catch (e) {
           lastError = '代码块内 JSON 语法错误: $e';
         }
@@ -552,11 +823,13 @@ class AIExtractorService {
     List<dynamic> rawList = [];
     if (parsedJson is List) {
       rawList = parsedJson;
+      lastError ??= '警告：顶层直接输出了数组而非 GBNF 规范的 {"events": [...]} 对象';
     } else if (parsedJson is Map) {
       if (parsedJson['events'] is List) {
         rawList = parsedJson['events'] as List;
       } else if (parsedJson.containsKey('title')) {
         rawList = [parsedJson];
+        lastError ??= '警告：顶层直接输出了单个日程对象而非 {"events": [...]}';
       }
     }
 
@@ -573,7 +846,12 @@ class AIExtractorService {
     for (final item in rawList) {
       if (item is! Map) continue;
       try {
-        final map = Map<String, dynamic>.from(item);
+        final rawItemMap = Map<String, dynamic>.from(item);
+        final gbnfViolation = validateEventItemAgainstGbnf(rawItemMap);
+        if (gbnfViolation != null && lastError == null) {
+          lastError = gbnfViolation;
+        }
+        final map = _normalizeEventMapForGbnfSpec(rawItemMap);
         map['sourceText'] = rawText;
         map['sourceType'] = sourceType;
         map['deviceOrigin'] = deviceOrigin;
@@ -599,22 +877,31 @@ class AIExtractorService {
     );
   }
 
-  /// 专用提示词调试测试推理接口（不回退规则引擎，保留完整原始流与错误诊断）
+  /// 专用提示词调试测试推理接口（不回退规则引擎，保留完整原始流与 GBNF 错误诊断）
   static Future<ExtractionResult> testInference({
     required String userPrompt,
     required String systemPrompt,
     String? modelName,
     String llmEndpoint = 'http://127.0.0.1:11434/api/generate',
     bool thinkMode = false,
+    bool? useGbnf,
     ExtractionProgressCallback? onProgress,
   }) async {
     final sw = Stopwatch()..start();
     final now = DateTime.now();
     final prompt = buildSystemPrompt(now, systemPrompt);
     final deviceOrigin = Platform.isAndroid ? 'android' : 'windows';
+    final effectiveGbnf = useGbnf ?? enableGbnfConstraint;
 
     onProgress?.call(stepLog: '[测试] 启动端侧模型提示词独立调试...');
     onProgress?.call(stepLog: '[注入] 已构建系统提示词 (长度: ${prompt.length} 字符)');
+    if (effectiveGbnf) {
+      onProgress?.call(
+        stepLog: '[GBNF] 已启用 GGML BNF 强制语法约束 (严格锁定 events Schema 与 ISO-8601 时间格式)',
+      );
+    } else {
+      onProgress?.call(stepLog: '[GBNF] 当前已关闭 GBNF 强约束，仅使用基础 JSON 模式');
+    }
 
     var tokenCounter = 0;
     String targetModel = modelName ?? '';
@@ -637,6 +924,11 @@ class AIExtractorService {
             userPrompt: userPrompt,
             preferredModelId: targetModel,
             thinkMode: thinkMode,
+            gbnfGrammar: effectiveGbnf
+                ? (thinkMode
+                    ? activeGbnfGrammar
+                    : prefilledAgendaGbnfGrammar.trim())
+                : null,
             onToken: (tok) {
               tokenCounter++;
               onProgress?.call(token: tok, tokenCount: tokenCounter);
@@ -656,7 +948,8 @@ class AIExtractorService {
           );
           return ExtractionResult(
             events: diag.events,
-            engineUsed: 'Android 端侧引擎 ($targetModel)',
+            engineUsed:
+                'Android 端侧引擎 ($targetModel${effectiveGbnf ? " · GBNF" : ""})',
             elapsedMs: sw.elapsedMilliseconds,
             promptPreview: prompt,
             rawResponse: raw,
@@ -672,20 +965,32 @@ class AIExtractorService {
       );
       try {
         final uri = Uri.parse(llmEndpoint);
-        final req = await client.postUrl(uri);
-        req.headers.contentType =
-            ContentType('application', 'json', charset: 'utf-8');
-        final body = {
-          'model': targetModel,
-          'system': prompt,
-          'prompt': userPrompt,
-          'stream': true,
-          'think': thinkMode,
-          'format': 'json',
-        };
-        req.add(utf8.encode(jsonEncode(body)));
-        final resp =
-            await req.close().timeout(Duration(seconds: thinkMode ? 75 : 40));
+
+        Future<HttpClientResponse> sendTestReq({bool fallbackFormat = false}) async {
+          final req = await client.postUrl(uri);
+          req.headers.contentType =
+              ContentType('application', 'json', charset: 'utf-8');
+          final body = _buildLlmRequestBody(
+            modelName: targetModel,
+            systemPrompt: prompt,
+            userPrompt: userPrompt,
+            streamMode: true,
+            thinkMode: thinkMode,
+            useGbnf: effectiveGbnf,
+            fallbackBasicJsonFormat: fallbackFormat,
+          );
+          req.add(utf8.encode(jsonEncode(body)));
+          return req.close().timeout(Duration(seconds: thinkMode ? 75 : 40));
+        }
+
+        var resp = await sendTestReq();
+        if (resp.statusCode != 200 && effectiveGbnf) {
+          onProgress?.call(
+            stepLog: '[兼容] 服务端不支持 Schema 对象格式，自动回退至基础 JSON 格式重试...',
+          );
+          await resp.drain();
+          resp = await sendTestReq(fallbackFormat: true);
+        }
         if (resp.statusCode != 200) {
           throw Exception('服务端返回状态码: ${resp.statusCode}');
         }
@@ -698,11 +1003,22 @@ class AIExtractorService {
           if (line.trim().isEmpty) continue;
           try {
             final parsed = jsonDecode(line);
-            if (parsed is Map && parsed.containsKey('response')) {
-              final tok = parsed['response']?.toString() ?? '';
-              fullResponse.write(tok);
-              tokenCounter++;
-              onProgress?.call(token: tok, tokenCount: tokenCounter);
+            if (parsed is Map) {
+              if (parsed.containsKey('thinking')) {
+                final thinkTok = parsed['thinking']?.toString() ?? '';
+                if (thinkTok.isNotEmpty) {
+                  tokenCounter++;
+                  onProgress?.call(token: thinkTok, tokenCount: tokenCounter);
+                }
+              }
+              if (parsed.containsKey('response')) {
+                final tok = parsed['response']?.toString() ?? '';
+                if (tok.isNotEmpty) {
+                  fullResponse.write(tok);
+                  tokenCounter++;
+                  onProgress?.call(token: tok, tokenCount: tokenCounter);
+                }
+              }
             }
           } catch (_) {}
         }
@@ -720,7 +1036,7 @@ class AIExtractorService {
         );
         return ExtractionResult(
           events: diag.events,
-          engineUsed: '端侧大模型 ($targetModel)',
+          engineUsed: '端侧大模型 ($targetModel${effectiveGbnf ? " · GBNF" : ""})',
           elapsedMs: sw.elapsedMilliseconds,
           promptPreview: prompt,
           rawResponse: raw,

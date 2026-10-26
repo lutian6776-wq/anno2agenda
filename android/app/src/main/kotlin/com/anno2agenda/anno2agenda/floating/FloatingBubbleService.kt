@@ -168,20 +168,28 @@ class FloatingBubbleService : Service() {
         coordinator: FloatingCaptureCoordinator
     ) {
         panel.onCloseClicked = {
+            controller.setKeyboardFocusable(false)
             controller.collapseToPill()
+        }
+
+        panel.onInputFocusRequested = {
+            controller.setKeyboardFocusable(true)
         }
 
         panel.onReadScreenClicked = {
             if (isExtracting) {
                 panel.setStatusText("⏳ 正在提取日程，请稍候...")
             } else {
-                panel.setStatusText("👁️ 正在通过无障碍节点树深度读取当前屏幕文本...")
+                controller.setKeyboardFocusable(false)
+                panel.setStatusText("👁️ 正在通过无障碍节点树深度读取当前屏幕主窗口...")
                 coordinator.captureCurrentScreen(
                     onBeforeCapture = {
-                        // 临时隐藏悬浮面板 100ms，让出焦点使底层微信/QQ对话恢复为活动窗口且无遮挡
-                        controller.hideTemporarilyForScreenshot(100) {}
+                        // 彻底隐藏悬浮窗并归还焦点给底层微信/QQ主窗口
+                        controller.setOverlayHiddenForCapture(true)
                     },
-                    onAfterCapture = {},
+                    onAfterCapture = {
+                        controller.setOverlayHiddenForCapture(false)
+                    },
                     onResult = { res ->
                         if (res.success) {
                             panel.setInputText(res.text)
@@ -212,12 +220,15 @@ class FloatingBubbleService : Service() {
             if (isExtracting) {
                 panel.setStatusText("⏳ 正在提取日程，请稍候...")
             } else {
+                controller.setKeyboardFocusable(false)
                 panel.setStatusText("📸 正在静默截屏并运行端侧离线中文 OCR...")
                 coordinator.captureScreenshotOcr(
                     onBeforeScreenshot = {
-                        controller.hideTemporarilyForScreenshot(140) {}
+                        controller.setOverlayHiddenForCapture(true)
                     },
-                    onAfterScreenshot = {},
+                    onAfterScreenshot = {
+                        controller.setOverlayHiddenForCapture(false)
+                    },
                     onResult = { res ->
                         if (res.success) {
                             panel.setInputText(res.text)
@@ -235,7 +246,10 @@ class FloatingBubbleService : Service() {
                 panel.setStatusText("⏳ 正在提取日程，请稍候...")
             } else {
                 panel.setStatusText("📋 正在读取系统剪贴板...")
+                // Android 10+ 读取剪贴板需要窗口临时具备焦点
+                controller.setKeyboardFocusable(true)
                 coordinator.captureClipboard(silentIfEmpty = false) { res ->
+                    controller.setKeyboardFocusable(false)
                     if (res.success) {
                         panel.setInputText(res.text)
                         triggerAiExtraction(panel, res.text, res.sourceType)

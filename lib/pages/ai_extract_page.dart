@@ -24,6 +24,7 @@ class AIExtractPage extends StatefulWidget {
   final Future<void> Function(AgendaEvent event) onConfirmDraft;
   final Future<void> Function({bool writeSystemCalendar}) onConfirmAllDrafts;
   final void Function(AgendaEvent event) onRemoveDraft;
+  final void Function(AgendaEvent event)? onUpdateDraft;
 
   const AIExtractPage({
     super.key,
@@ -42,6 +43,7 @@ class AIExtractPage extends StatefulWidget {
     required this.onConfirmDraft,
     required this.onConfirmAllDrafts,
     required this.onRemoveDraft,
+    this.onUpdateDraft,
   });
 
   static const List<Map<String, String>> sampleAnnouncements = [
@@ -300,9 +302,13 @@ class _AIExtractPageState extends State<AIExtractPage> {
                   final ev = widget.draftEvents[idx];
                   return AgendaEventCard(
                     event: ev,
+                    showDate: true,
                     isDraft: true,
                     onSyncCalendar: () => widget.onConfirmDraft(ev),
                     onDelete: () => widget.onRemoveDraft(ev),
+                    onEventChanged: (updated) {
+                      widget.onUpdateDraft?.call(updated);
+                    },
                   );
                 },
               ),

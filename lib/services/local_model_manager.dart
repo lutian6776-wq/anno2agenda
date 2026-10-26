@@ -385,6 +385,7 @@ class LocalModelManager {
     required String userPrompt,
     String? preferredModelId,
     bool? thinkMode,
+    String? gbnfGrammar,
     void Function(String token)? onToken,
   }) async {
     if (!Platform.isAndroid) return null;
@@ -472,6 +473,20 @@ class LocalModelManager {
       final String fullPrompt;
       final int maxTokensToGen;
       final StringBuffer buffer;
+
+      // 通过底层通道向 llama.cpp 注入 GBNF 语法规则（免思考模式直接强制约束；深度思考模式在 </think> 后惰性触发 GBNF）
+      try {
+        if (gbnfGrammar != null && gbnfGrammar.trim().isNotEmpty) {
+          final grammarKey =
+              isThink ? '__gbnf_grammar_lazy__' : '__gbnf_grammar__';
+          await controller.registerCustomTemplate(
+            grammarKey,
+            gbnfGrammar.trim(),
+          );
+        } else {
+          await controller.unregisterCustomTemplate('__gbnf_grammar__');
+        }
+      } catch (_) {}
 
       if (!isThink) {
         // 免思考极速模式：Qwen3.5 预填充绕过思维链，直接从 {"events":[ 开始输出 JSON
