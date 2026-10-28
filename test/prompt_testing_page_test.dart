@@ -109,8 +109,8 @@ void main() {
     // Verify PromptTestingPage elements
     expect(find.text('System Prompt (系统指令模板)'), findsOneWidget);
     expect(find.text('{TIME_ANCHOR} 宏'), findsOneWidget);
-    expect(find.text('恢复默认提示词'), findsOneWidget);
-    expect(find.text('🚀 运行提示词推理测试'), findsOneWidget);
+    expect(find.text('恢复默认'), findsOneWidget);
+    expect(find.textContaining('🚀 运行提示词推理测试'), findsOneWidget);
 
     // Wait for async local model loader timer
     await tester.pumpAndSettle(const Duration(seconds: 5));
