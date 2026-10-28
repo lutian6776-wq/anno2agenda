@@ -1,48 +1,102 @@
-# Miscellaneous
-*.class
+# =====================================================================
+# 1. 大语言模型权重文件 (LLM Weights & Models)
+# 【重要提示】Gitee 免费版单文件上限 100MB、单仓库上限 500MB
+# 模型文件请通过魔搭社区 (ModelScope) 或网盘单独向协作同学分发，严禁提交到 Git
+# =====================================================================
+models/*.gguf
+models/*.bin
+models/*.safetensors
+models/*.onnx
+*.gguf
+*.bin
+*.safetensors
+*.onnx
+
+# 保留 Ollama 的模型构建指令模板文件
+!models/Modelfile_*
+
+# =====================================================================
+# 2. 运行日志与大型调试记录 (Logs & Traces)
+# =====================================================================
 *.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
+log.txt
+*.buildlog
+*.history
+build.log
 
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
+# =====================================================================
+# 3. 本地运行时数据与测试导出 (Local Runtime Data & Exports)
+# 避免团队协作时不同机器的个人日程数据与配置相互覆盖冲突
+# =====================================================================
+agenda_events.json
+theme_mode.txt
+exported_ics/
+scratch/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# =====================================================================
+# 4. Flutter / Dart 构件与依赖缓存 (Flutter / Dart / Pub)
+# =====================================================================
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
-/build/
-/coverage/
+build/
+coverage/
+.packages
+doc/api/
 
-# Symbolication related
+# 符号化与混淆映射产物
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# =====================================================================
+# 5. Android 构建产物与私有配置 (Android Specific)
+# =====================================================================
+android/.gradle/
+android/captures/
+android/local.properties
+android/app/debug/
+android/app/profile/
+android/app/release/
+**/android/app/build/
+**/android/build/
+.gradle/
 
-# Widget Preview related
+# Android 签名密钥与私密配置
+*.jks
+*.keystore
+key.properties
+
+# =====================================================================
+# 6. Windows 桌面构建中间文件 (Windows Desktop Ephemeral)
+# =====================================================================
+windows/flutter/ephemeral/
+windows/runner/Debug/
+windows/runner/Release/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+
+# =====================================================================
+# 7. IDE 与开发工具私有配置 (IDEs & Editors)
+# =====================================================================
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
 .widget_preview/
+
+# =====================================================================
+# 8. 操作系统自动生成的临时文件 (OS Generated)
+# =====================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
