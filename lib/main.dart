@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'pages/home_workbench_page.dart';
-import 'services/theme_manager.dart';
+import 'services/app_settings_service.dart';
+import 'services/theme_manager.dart' hide AppTheme;
+import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await AppSettingsService.instance.init();
   await ThemeManager.instance.init();
   runApp(const Anno2AgendaApp());
 }

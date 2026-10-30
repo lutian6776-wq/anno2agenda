@@ -76,6 +76,14 @@ class AgendaRepository implements IAgendaRepository {
     return idx >= 0 ? _events[idx] : null;
   }
 
+  /// 根据系统日历事件 ID 精确查找日程
+  @override
+  AgendaEvent? getEventBySystemCalendarId(String sysCalId) {
+    if (sysCalId.trim().isEmpty) return null;
+    final idx = _events.indexWhere((e) => e.systemCalendarEventId == sysCalId);
+    return idx >= 0 ? _events[idx] : null;
+  }
+
   /// 根据 ID 或核心三要素（标题、开始时间、地点）探测是否存在重复日程
   @override
   AgendaEvent? findDuplicate(AgendaEvent event) {

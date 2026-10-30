@@ -114,24 +114,29 @@ class AgendaWriteService {
     }
 
     // 3. 需写入系统日历：检查是否已经同步过系统日历
-    if (effectiveEvent.syncedToSystemCalendar) {
-      // 已经写入过系统日历，直接更新本地数据，避免向系统日历插入重复事件
+    if (effectiveEvent.syncedToSystemCalendar &&
+        effectiveEvent.systemCalendarEventId != null &&
+        effectiveEvent.systemCalendarEventId!.isNotEmpty) {
+      // 已经写入过系统日历，调用系统更新接口同步更新事件内容
       try {
+        final updateRes =
+            await PlatformBridge.updateCalendarEvent(effectiveEvent);
         await _repo.addEvent(effectiveEvent);
         return AgendaWriteResult(
           eventId: effectiveEvent.id,
           success: true,
-          message: '日程此前已同步至系统日历，已自动更新本地记录，避免重复写入',
+          message: updateRes.success ? '已同步更新至系统日历，避免重复写入' : updateRes.message,
           persisted: true,
           systemCalendarEventId: effectiveEvent.systemCalendarEventId,
           event: effectiveEvent,
         );
       } catch (e) {
+        await _repo.addEvent(effectiveEvent);
         return AgendaWriteResult(
           eventId: effectiveEvent.id,
-          success: false,
-          message: '本地保存失败: $e',
-          persisted: false,
+          success: true,
+          message: '本地已更新，但系统日历同步更新异常: $e',
+          persisted: true,
           systemCalendarEventId: effectiveEvent.systemCalendarEventId,
           event: effectiveEvent,
         );

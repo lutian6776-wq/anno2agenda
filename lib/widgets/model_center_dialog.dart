@@ -9,6 +9,7 @@ class ModelCenterDialog extends StatefulWidget {
   final Set<String> downloadedSpecIds;
   final Map<String, double> partialCacheMB;
   final ModelDownloadProgress? activeDownload;
+  final Map<String, ModelDownloadProgress>? activeDownloads;
   final Future<void> Function() onRefreshState;
   final ValueChanged<String> onSelectModel;
   final void Function(AIEngineMode mode) onEngineModeChanged;
@@ -20,7 +21,8 @@ class ModelCenterDialog extends StatefulWidget {
     required this.selectedModelName,
     required this.downloadedSpecIds,
     required this.partialCacheMB,
-    required this.activeDownload,
+    this.activeDownload,
+    this.activeDownloads,
     required this.onRefreshState,
     required this.onSelectModel,
     required this.onEngineModeChanged,
@@ -33,7 +35,8 @@ class ModelCenterDialog extends StatefulWidget {
     required String? selectedModelName,
     required Set<String> downloadedSpecIds,
     required Map<String, double> partialCacheMB,
-    required ModelDownloadProgress? activeDownload,
+    ModelDownloadProgress? activeDownload,
+    Map<String, ModelDownloadProgress>? activeDownloads,
     required Future<void> Function() onRefreshState,
     required ValueChanged<String> onSelectModel,
     required void Function(AIEngineMode mode) onEngineModeChanged,
@@ -47,6 +50,7 @@ class ModelCenterDialog extends StatefulWidget {
         downloadedSpecIds: downloadedSpecIds,
         partialCacheMB: partialCacheMB,
         activeDownload: activeDownload,
+        activeDownloads: activeDownloads,
         onRefreshState: onRefreshState,
         onSelectModel: onSelectModel,
         onEngineModeChanged: onEngineModeChanged,
@@ -64,7 +68,9 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
   String? _selectedModelName;
   late Set<String> _downloadedSpecIds;
   late Map<String, double> _partialCacheMB;
-  ModelDownloadProgress? _activeDownload;
+
+  /// 多模型独立下载状态表 (modelId -> ModelDownloadProgress)
+  Map<String, ModelDownloadProgress> _activeDownloads = {};
 
   @override
   void initState() {
@@ -73,7 +79,56 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
     _selectedModelName = widget.selectedModelName;
     _downloadedSpecIds = Set.from(widget.downloadedSpecIds);
     _partialCacheMB = Map.from(widget.partialCacheMB);
-    _activeDownload = widget.activeDownload;
+
+    // 优先从全局管理器同步所有当前正在进行的下载任务状态
+    _activeDownloads = Map.from(LocalModelManager.activeDownloads);
+    if (widget.activeDownloads != null) {
+      _activeDownloads.addAll(widget.activeDownloads!);
+    }
+    if (widget.activeDownload != null) {
+      _activeDownloads[widget.activeDownload!.modelId] = widget.activeDownload!;
+    }
+
+    // 注册全局下载进度监听器（切出页面再次打开也能持续实时刷新进度与速度）
+    LocalModelManager.activeDownloadsNotifier.addListener(_onDownloadUpdates);
+
+    // 打开窗口时自动异步刷新最新的本地磁盘已下载状态和缓存
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    LocalModelManager.activeDownloadsNotifier.removeListener(_onDownloadUpdates);
+    super.dispose();
+  }
+
+  void _onDownloadUpdates() {
+    if (!mounted) return;
+    final newDownloads = LocalModelManager.activeDownloads;
+    bool shouldRefresh = false;
+
+    for (final entry in newDownloads.entries) {
+      final prev = _activeDownloads[entry.key];
+      // 某个模型下载刚刚完成，触发磁盘模型列表刷新
+      if (entry.value.isCompleted && (prev == null || !prev.isCompleted)) {
+        shouldRefresh = true;
+      }
+    }
+
+    setState(() {
+      _activeDownloads = Map.from(newDownloads);
+      // 实时同步未完成的下载体积到缓存字典，避免按钮闪烁
+      for (final entry in newDownloads.entries) {
+        if (entry.value.receivedBytes > 0) {
+          _partialCacheMB[entry.key] =
+              entry.value.receivedBytes / (1024 * 1024);
+        }
+      }
+    });
+
+    if (shouldRefresh) {
+      _refresh();
+    }
   }
 
   Future<bool> _confirmDeleteDialog(String title, String detail) async {
@@ -246,9 +301,10 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
               ...LocalModelManager.catalog.map((spec) {
                 final isDownloaded = _downloadedSpecIds.contains(spec.id);
                 final partMB = _partialCacheMB[spec.id] ?? 0.0;
-                final isDownloadingThis = _activeDownload?.modelId == spec.id &&
-                    !_activeDownload!.isCompleted &&
-                    _activeDownload!.error == null;
+                final downloadProgress = _activeDownloads[spec.id];
+                final isDownloadingThis = downloadProgress != null &&
+                    !downloadProgress.isCompleted &&
+                    downloadProgress.error == null;
 
                 return Card(
                   margin: const EdgeInsets.only(bottom: 10),
@@ -306,26 +362,48 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
                           style: TextStyle(
                               fontSize: 12, color: Colors.grey.shade700),
                         ),
-                        if (isDownloadingThis && _activeDownload != null) ...[
+                        if (isDownloadingThis) ...[
                           const SizedBox(height: 10),
-                          LinearProgressIndicator(
-                            value: _activeDownload!.progress,
+                          ClipRRect(
                             borderRadius: BorderRadius.circular(6),
+                            child: LinearProgressIndicator(
+                              value: downloadProgress.progress,
+                              minHeight: 8,
+                              backgroundColor: isDark
+                                  ? const Color(0xFF1E293B)
+                                  : const Color(0xFFE2E8F0),
+                            ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            '正在下载: ${(_activeDownload!.receivedBytes / (1024 * 1024)).toStringAsFixed(1)} MB / '
-                            '${(_activeDownload!.totalBytes / (1024 * 1024)).toStringAsFixed(1)} MB '
-                            '(${(_activeDownload!.progress * 100).toStringAsFixed(1)}% · ${_activeDownload!.speedMBps.toStringAsFixed(1)} MB/s)',
-                            style: const TextStyle(
-                                fontSize: 12, color: Color(0xFF2563EB)),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '正在下载: ${(downloadProgress.receivedBytes / (1024 * 1024)).toStringAsFixed(1)} MB / '
+                                '${(downloadProgress.totalBytes / (1024 * 1024)).toStringAsFixed(1)} MB '
+                                '(${(downloadProgress.progress * 100).toStringAsFixed(1)}%)',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF2563EB),
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              Text(
+                                '${downloadProgress.speedMBps.toStringAsFixed(1)} MB/s',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF2563EB),
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
-                        if (_activeDownload?.modelId == spec.id &&
-                            _activeDownload?.error != null) ...[
+                        if (downloadProgress != null &&
+                            downloadProgress.error != null) ...[
                           const SizedBox(height: 6),
                           Text(
-                            '提示: ${_activeDownload!.error}',
+                            '提示: ${downloadProgress.error}',
                             style: TextStyle(
                                 fontSize: 12, color: Colors.orange.shade800),
                           ),
@@ -341,7 +419,9 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
                               if (isDownloadingThis)
                                 OutlinedButton.icon(
                                   onPressed: () {
-                                    LocalModelManager.cancelDownload();
+                                    LocalModelManager.cancelDownload(spec.id);
+                                    widget.onShowSnack(
+                                        '⏸️ 已暂停 ${spec.name} 下载');
                                   },
                                   icon: const Icon(Icons.pause, size: 16),
                                   label: const Text('暂停（支持断点续传）'),
@@ -364,11 +444,12 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
                                     if (!ok) return;
                                     final freedMB = await LocalModelManager
                                         .deleteDownloadedModel(spec);
-                                    setState(() {
-                                      if (_activeDownload?.modelId == spec.id) {
-                                        _activeDownload = null;
-                                      }
-                                    });
+                                    if (mounted) {
+                                      setState(() {
+                                        _activeDownloads.remove(spec.id);
+                                        _partialCacheMB.remove(spec.id);
+                                      });
+                                    }
                                     await _refresh();
                                     widget.onShowSnack(
                                         '🗑️ 已删除 ${spec.name}（释放 ${freedMB.toStringAsFixed(1)} MB 空间）');
@@ -385,8 +466,10 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
                                     await LocalModelManager
                                         .registerDownloadedGgufToRuntime(spec);
                                     await _refresh();
-                                    setState(
-                                        () => _selectedModelName = spec.id);
+                                    if (mounted) {
+                                      setState(
+                                          () => _selectedModelName = spec.id);
+                                    }
                                     widget.onSelectModel(spec.id);
                                     widget.onEngineModeChanged(
                                         AIEngineMode.hybridAuto);
@@ -399,11 +482,16 @@ class _ModelCenterDialogState extends State<ModelCenterDialog> {
                               if (!isDownloadingThis && !isDownloaded)
                                 FilledButton.icon(
                                   onPressed: () {
+                                    if (LocalModelManager.isModelDownloading(
+                                        spec.id)) {
+                                      return;
+                                    }
+                                    widget.onShowSnack(
+                                        '🚀 开始高速下载 ${spec.name}...');
                                     LocalModelManager.downloadModel(
                                       spec: spec,
                                       onProgress: (prog) async {
                                         if (!mounted) return;
-                                        setState(() => _activeDownload = prog);
                                         if (prog.isCompleted ||
                                             prog.error != null) {
                                           await _refresh();

@@ -70,6 +70,8 @@ class AgendaEvent {
         'systemCalendarEventId': systemCalendarEventId,
       };
 
+  static int _idCounter = 0;
+
   factory AgendaEvent.fromJson(Map<String, dynamic> json) {
     DateTime start;
     final parsedStart = DateTime.tryParse(json['startTime']?.toString() ?? '');
@@ -101,9 +103,13 @@ class AgendaEvent {
       end = start.add(const Duration(hours: 1));
     }
 
+    final rawId = json['id']?.toString().trim();
+    final resolvedId = (rawId != null && rawId.isNotEmpty)
+        ? rawId
+        : '${DateTime.now().microsecondsSinceEpoch}_${++_idCounter}';
+
     return AgendaEvent(
-      id: json['id']?.toString() ??
-          DateTime.now().microsecondsSinceEpoch.toString(),
+      id: resolvedId,
       title: json['title']?.toString() ?? '未命名日程',
       startTime: start,
       endTime: end,
@@ -198,6 +204,80 @@ class AgendaEvent {
       ..writeln('END:VEVENT')
       ..writeln('END:VCALENDAR');
     return buffer.toString();
+  }
+
+  /// 从 RFC 5545 .ics 格式字符串反向解析为 AgendaEvent
+  static AgendaEvent? fromIcsString(String ics) {
+    try {
+      if (!ics.contains('BEGIN:VEVENT')) return null;
+      String getField(String name) {
+        final reg = RegExp('$name:(.*?)(\r?\n|\$)', caseSensitive: false);
+        final match = reg.firstMatch(ics);
+        return match?.group(1)?.trim() ?? '';
+      }
+
+      DateTime parseIcsDate(String val) {
+        var v = val.replaceAll('-', '').replaceAll(':', '');
+        if (v.endsWith('Z')) {
+          v = v.substring(0, v.length - 1);
+          final y = int.parse(v.substring(0, 4));
+          final m = int.parse(v.substring(4, 6));
+          final d = int.parse(v.substring(6, 8));
+          final h = v.length >= 11 ? int.parse(v.substring(9, 11)) : 0;
+          final min = v.length >= 13 ? int.parse(v.substring(11, 13)) : 0;
+          final s = v.length >= 15 ? int.parse(v.substring(13, 15)) : 0;
+          return DateTime.utc(y, m, d, h, min, s).toLocal();
+        } else if (v.contains('T')) {
+          final parts = v.split('T');
+          final y = int.parse(parts[0].substring(0, 4));
+          final m = int.parse(parts[0].substring(4, 6));
+          final d = int.parse(parts[0].substring(6, 8));
+          final timePart = parts[1];
+          final h =
+              timePart.length >= 2 ? int.parse(timePart.substring(0, 2)) : 0;
+          final min =
+              timePart.length >= 4 ? int.parse(timePart.substring(2, 4)) : 0;
+          final s =
+              timePart.length >= 6 ? int.parse(timePart.substring(4, 6)) : 0;
+          return DateTime(y, m, d, h, min, s);
+        } else if (v.length >= 8) {
+          final y = int.parse(v.substring(0, 4));
+          final m = int.parse(v.substring(4, 6));
+          final d = int.parse(v.substring(6, 8));
+          return DateTime(y, m, d, 9, 0);
+        }
+        return DateTime.now();
+      }
+
+      final uid = getField('UID').replaceAll('@anno2agenda.local', '');
+      final title = getField('SUMMARY');
+      final location = getField('LOCATION');
+      final desc = getField('DESCRIPTION').replaceAll('\\n', '\n');
+      final dtStartStr = getField('DTSTART');
+      final dtEndStr = getField('DTEND');
+      final start = parseIcsDate(dtStartStr);
+      final end = dtEndStr.isNotEmpty
+          ? parseIcsDate(dtEndStr)
+          : start.add(const Duration(hours: 1));
+
+      return AgendaEvent(
+        id: uid.isNotEmpty
+            ? uid
+            : 'ics_${DateTime.now().microsecondsSinceEpoch}',
+        title: title.isNotEmpty ? title : '外部导入日历事项',
+        startTime: start,
+        endTime: end,
+        location: location,
+        description: desc,
+        sourceText: '从 .ics 日历文件导入',
+        sourceType: 'system_calendar',
+        reminderMinutes: 30,
+        syncedToSystemCalendar: true,
+        systemCalendarEventId: uid.isNotEmpty ? uid : null,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   static String encodeList(List<AgendaEvent> events) =>

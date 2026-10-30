@@ -137,6 +137,40 @@ class MainActivity : FlutterActivity() {
                         )
                     }
                 }
+                "deleteCalendarEvent" -> {
+                    val rawId = call.argument<Any>("eventId") ?: call.argument<Any>("systemCalendarEventId")
+                    val eventId = rawId?.toString()?.toLongOrNull()
+                    if (eventId == null || eventId <= 0) {
+                        result.success(mapOf("success" to false, "message" to "日历事件ID无效: $rawId"))
+                        return@setMethodCallHandler
+                    }
+                    val res = CalendarWriterHelper.deleteFromSystemCalendar(this, eventId)
+                    result.success(res)
+                }
+                "getCalendarEvents" -> {
+                    val startMillis = (call.argument<Number>("startMillis"))?.toLong()
+                        ?: (System.currentTimeMillis() - 30L * 86400000L)
+                    val endMillis = (call.argument<Number>("endMillis"))?.toLong()
+                        ?: (System.currentTimeMillis() + 90L * 86400000L)
+                    val calId = (call.argument<Any>("calendarId"))?.toString()?.toLongOrNull()
+                    val res = CalendarWriterHelper.querySystemCalendarEvents(this, startMillis, endMillis, calId)
+                    result.success(res)
+                }
+                "updateCalendarEvent" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val rawId = args?.get("eventId") ?: args?.get("systemCalendarEventId")
+                    val eventId = rawId?.toString()?.toLongOrNull()
+                    if (args == null || eventId == null || eventId <= 0) {
+                        result.success(mapOf("success" to false, "message" to "更新参数或事件ID无效: $rawId"))
+                        return@setMethodCallHandler
+                    }
+                    val res = CalendarWriterHelper.updateSystemCalendarEvent(this, eventId, args)
+                    result.success(res)
+                }
+                "getSystemCalendars" -> {
+                    val res = CalendarWriterHelper.querySystemCalendars(this)
+                    result.success(res)
+                }
                 "toggleFloatingWindow" -> {
                     val args = call.arguments as? Map<*, *>
                     val enable = args?.get("enable") == true

@@ -17,6 +17,7 @@ abstract class IAgendaRepository {
   Future<void> init({String? storageDir});
   Future<void> reload();
   AgendaEvent? getEventById(String id);
+  AgendaEvent? getEventBySystemCalendarId(String sysCalId);
   AgendaEvent? findDuplicate(AgendaEvent event);
   Future<void> addEvent(AgendaEvent event);
   Future<void> addEvents(List<AgendaEvent> events);

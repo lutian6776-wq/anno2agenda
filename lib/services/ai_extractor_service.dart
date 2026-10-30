@@ -1,7 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 import '../models/agenda_event.dart';
+import '../models/inference_terminal_model.dart';
 import 'local_model_manager.dart';
+
+export '../models/inference_terminal_model.dart';
 
 enum AIEngineMode {
   /// 优先尝试本地大模型 (自动探测/拉起本机模型)，若未就绪则无缝回退至内置端侧规则引擎
@@ -31,12 +34,6 @@ class ExtractionResult {
     this.jsonParseError,
   });
 }
-
-typedef ExtractionProgressCallback = void Function({
-  String? stepLog,
-  String? token,
-  int? tokenCount,
-});
 
 class AIExtractorService {
   /// 全局共享的当前引擎模式（由设置或工作台界面动态切换）
@@ -265,7 +262,23 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     bool? useGbnf,
     String? customSystemPrompt,
     ExtractionProgressCallback? onProgress,
+    InferenceTerminalModel? terminalModel,
   }) async {
+    final incomingOnProgress = onProgress;
+    onProgress = (terminalModel != null && incomingOnProgress != null)
+        ? ({String? stepLog, String? token, int? tokenCount}) {
+            terminalModel.handleProgress(
+              stepLog: stepLog,
+              token: token,
+              tokenCount: tokenCount,
+            );
+            incomingOnProgress(
+              stepLog: stepLog,
+              token: token,
+              tokenCount: tokenCount,
+            );
+          }
+        : (terminalModel?.progressCallback ?? incomingOnProgress);
     final sw = Stopwatch()..start();
     final now = DateTime.now();
     final prompt = buildSystemPrompt(now, customSystemPrompt);
@@ -438,9 +451,12 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       // 兼容原生 llama-server / llama.cpp HTTP 接口直接读取 GBNF grammar 字段
       if (useStrictSchema) 'grammar': activeGbnfGrammar,
       'options': {
-        'temperature': 0.1,
-        'top_p': 0.85,
-        'repeat_penalty': 1.05,
+        'num_ctx': LocalModelManager.contextSize,
+        'num_predict':
+            thinkMode ? LocalModelManager.maxThinkingTokens : 512,
+        'temperature': LocalModelManager.temperature,
+        'top_p': LocalModelManager.topP,
+        'repeat_penalty': LocalModelManager.repeatPenalty,
       },
     };
   }
@@ -463,6 +479,23 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     try {
       final uri = Uri.parse(endpoint);
       final isExtractApi = uri.path.endsWith('/extract');
+      final isCompletionApi = uri.path.endsWith('/completion');
+
+      // 1. 若显式指定 /completion 端点，直接走 llama-server 原生接口
+      if (isCompletionApi) {
+        return await _tryCallLlamaServerCompletion(
+          client: client,
+          uri: uri,
+          rawText: rawText,
+          systemPrompt: systemPrompt,
+          sourceType: sourceType,
+          deviceOrigin: deviceOrigin,
+          modelName: modelName,
+          useGbnf: useGbnf,
+          onToken: onToken,
+        );
+      }
+
       final bool streamMode = (!isExtractApi && onToken != null);
 
       Future<HttpClientResponse> sendRequest({bool fallbackFormat = false}) async {
@@ -488,6 +521,30 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       }
 
       var resp = await sendRequest();
+
+      // 2. 若对默认端口请求返回 404，自适应无缝重定向至 llama-server 原生 /completion 接口
+      if (resp.statusCode == 404 && !isExtractApi) {
+        await resp.drain();
+        final completionUri = uri.replace(path: '/completion');
+        try {
+          final llamaServerEvents = await _tryCallLlamaServerCompletion(
+            client: client,
+            uri: completionUri,
+            rawText: rawText,
+            systemPrompt: systemPrompt,
+            sourceType: sourceType,
+            deviceOrigin: deviceOrigin,
+            modelName: modelName,
+            useGbnf: useGbnf,
+            onToken: onToken,
+          );
+          if (llamaServerEvents.isNotEmpty) {
+            return llamaServerEvents;
+          }
+        } catch (_) {}
+        return [];
+      }
+
       // 若旧版服务端不支持 JSON Schema 对象格式返回 400/500，自动无缝降级为 'format': 'json' 重试一次
       if (resp.statusCode != 200 && !isExtractApi && useGbnf) {
         await resp.drain();
@@ -501,6 +558,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
 
       if (streamMode) {
         final fullResponse = StringBuffer();
+        final thinkingBuffer = StringBuffer();
         await for (final line in resp
             .transform(utf8.decoder)
             .transform(const LineSplitter())) {
@@ -512,6 +570,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
               if (parsed.containsKey('thinking')) {
                 final thinkTok = parsed['thinking']?.toString() ?? '';
                 if (thinkTok.isNotEmpty) {
+                  thinkingBuffer.write(thinkTok);
                   onToken(thinkTok);
                 }
               }
@@ -525,9 +584,64 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
             }
           } catch (_) {}
         }
+
+        var rawJsonResponse = fullResponse.toString().trim();
+
+        // 🚨 Windows/Ollama 思考截断抢救：若思考耗尽了 token 预算导致 response 为空，自动以免思考模式基于已有思考草稿补完 JSON
+        if (thinkMode &&
+            (rawJsonResponse.isEmpty || !rawJsonResponse.contains('{')) &&
+            thinkingBuffer.isNotEmpty &&
+            !isExtractApi) {
+          onToken(
+            '\n\n[知程调度] ⚠️ 思考预算耗尽，正在基于已有思维链自动抢救直出日程 JSON...\n',
+          );
+          try {
+            final rescuePrompt = '$rawText\n\n'
+                '【前置思考推理草稿如下，请直接基于此草稿输出完整日程 JSON，严禁重复思考】：\n'
+                '${thinkingBuffer.toString()}';
+
+            final rescueReq = await client.postUrl(uri);
+            rescueReq.headers.contentType =
+                ContentType('application', 'json', charset: 'utf-8');
+            final rescueBody = _buildLlmRequestBody(
+              modelName: modelName,
+              systemPrompt: systemPrompt,
+              userPrompt: rescuePrompt,
+              streamMode: true,
+              thinkMode: false,
+              useGbnf: useGbnf,
+            );
+            rescueReq.add(utf8.encode(jsonEncode(rescueBody)));
+            final rescueResp = await rescueReq
+                .close()
+                .timeout(const Duration(seconds: 40));
+            if (rescueResp.statusCode == 200) {
+              final rescueBuf = StringBuffer();
+              await for (final l in rescueResp
+                  .transform(utf8.decoder)
+                  .transform(const LineSplitter())) {
+                if (l.trim().isEmpty) continue;
+                try {
+                  final p = jsonDecode(l);
+                  if (p is Map && p.containsKey('response')) {
+                    final t = p['response']?.toString() ?? '';
+                    if (t.isNotEmpty) {
+                      rescueBuf.write(t);
+                      onToken(t);
+                    }
+                  }
+                } catch (_) {}
+              }
+              if (rescueBuf.isNotEmpty) {
+                rawJsonResponse = rescueBuf.toString();
+              }
+            }
+          } catch (_) {}
+        }
+
         LocalModelManager.markLoaded(modelName);
         return _parseEventsFromRawJsonString(
-          rawJson: fullResponse.toString(),
+          rawJson: rawJsonResponse,
           rawText: rawText,
           sourceType: sourceType,
           deviceOrigin: deviceOrigin,
@@ -557,6 +671,119 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     } finally {
       client.close();
     }
+  }
+
+  /// 向 llama.cpp 官方预编译 llama-server 原生 /completion 发送流式推理请求并收集完整响应
+  static Future<String?> _requestLlamaServerCompletion({
+    required HttpClient client,
+    required Uri uri,
+    required String systemPrompt,
+    required String userPrompt,
+    required bool useGbnf,
+    void Function(String token)? onToken,
+    void Function(String log)? onLog,
+  }) async {
+    final fullPrompt = '<|im_start|>system\n'
+        '$systemPrompt<|im_end|>\n'
+        '<|im_start|>user\n'
+        '$userPrompt<|im_end|>\n'
+        '<|im_start|>assistant\n';
+
+    Future<HttpClientResponse> doSend({bool includeConstraint = true}) async {
+      final req = await client.postUrl(uri);
+      req.headers.contentType =
+          ContentType('application', 'json', charset: 'utf-8');
+      final body = <String, dynamic>{
+        'prompt': fullPrompt,
+        'stream': onToken != null,
+        'temperature': 0.1,
+        'n_predict': 1024,
+      };
+      if (useGbnf && includeConstraint) {
+        // llama-server 优先使用 json_schema（由底层 llama.cpp C++ 原生编译为 GBNF 采样器，杜绝语法解析错误）
+        body['json_schema'] = agendaJsonSchema;
+      }
+      req.add(utf8.encode(jsonEncode(body)));
+      return req.close().timeout(const Duration(seconds: 50));
+    }
+
+    var resp = await doSend(includeConstraint: true);
+    // 若特定服务端版本对 json_schema 报错 400，自动免约束重试一次
+    if (resp.statusCode != 200 && useGbnf) {
+      onLog?.call('⚠️ 服务端拒绝语法约束载荷 (HTTP ${resp.statusCode})，正在尝试无约束直出重试...');
+      await resp.drain();
+      resp = await doSend(includeConstraint: false);
+    }
+    if (resp.statusCode != 200) {
+      final errText = await resp.transform(utf8.decoder).join();
+      onLog?.call('❌ llama-server 错误 (HTTP ${resp.statusCode}): $errText');
+      return null;
+    }
+
+    if (onToken != null) {
+      final fullResponse = StringBuffer();
+      await for (final line in resp
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        if (trimmed.startsWith('data: ')) {
+          final jsonStr = trimmed.substring(6).trim();
+          if (jsonStr == '[DONE]') break;
+          try {
+            final parsed = jsonDecode(jsonStr);
+            if (parsed is Map) {
+              final tok = parsed['content']?.toString() ?? '';
+              if (tok.isNotEmpty) {
+                fullResponse.write(tok);
+                onToken(tok);
+              }
+              if (parsed['stop'] == true) break;
+            }
+          } catch (_) {}
+        }
+      }
+      return fullResponse.toString().trim();
+    } else {
+      final respText = await resp.transform(utf8.decoder).join();
+      try {
+        final decoded = jsonDecode(respText);
+        return (decoded is Map ? decoded['content']?.toString() : null) ?? respText;
+      } catch (_) {
+        return respText;
+      }
+    }
+  }
+
+  /// 调用 llama.cpp 官方预编译 llama-server 原生 /completion 接口（支持直接输入 GBNF Grammar）
+  static Future<List<AgendaEvent>> _tryCallLlamaServerCompletion({
+    required HttpClient client,
+    required Uri uri,
+    required String rawText,
+    required String systemPrompt,
+    required String sourceType,
+    required String deviceOrigin,
+    required String modelName,
+    required bool useGbnf,
+    void Function(String token)? onToken,
+  }) async {
+    final raw = await _requestLlamaServerCompletion(
+      client: client,
+      uri: uri,
+      systemPrompt: systemPrompt,
+      userPrompt: rawText,
+      useGbnf: useGbnf,
+      onToken: onToken,
+    );
+    if (raw == null || raw.isEmpty) return [];
+
+    LocalModelManager.markLoaded(modelName);
+    return _parseEventsFromRawJsonString(
+      rawJson: raw,
+      rawText: rawText,
+      sourceType: sourceType,
+      deviceOrigin: deviceOrigin,
+    );
   }
 
   /// 对单条事件 Map 进行 GBNF 规范化修补（例如将空格分隔的日期时间修正为标准 ISO-8601 `T` 格式）
@@ -690,6 +917,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     }
 
     final events = <AgendaEvent>[];
+    int itemIndex = 0;
     for (final item in rawList) {
       if (item is! Map) continue;
       try {
@@ -698,6 +926,10 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         map['sourceText'] = rawText;
         map['sourceType'] = sourceType;
         map['deviceOrigin'] = deviceOrigin;
+        if (map['id'] == null || map['id'].toString().trim().isEmpty) {
+          map['id'] = '${DateTime.now().microsecondsSinceEpoch}_$itemIndex';
+        }
+        itemIndex++;
         events.add(AgendaEvent.fromJson(map));
       } catch (_) {}
     }
@@ -843,6 +1075,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     }
 
     final events = <AgendaEvent>[];
+    int itemIndex = 0;
     for (final item in rawList) {
       if (item is! Map) continue;
       try {
@@ -855,6 +1088,10 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         map['sourceText'] = rawText;
         map['sourceType'] = sourceType;
         map['deviceOrigin'] = deviceOrigin;
+        if (map['id'] == null || map['id'].toString().trim().isEmpty) {
+          map['id'] = '${DateTime.now().microsecondsSinceEpoch}_$itemIndex';
+        }
+        itemIndex++;
         events.add(AgendaEvent.fromJson(map));
       } catch (e) {
         lastError = '部分日程项字段缺失或类型错误: $e';
@@ -886,7 +1123,23 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     bool thinkMode = false,
     bool? useGbnf,
     ExtractionProgressCallback? onProgress,
+    InferenceTerminalModel? terminalModel,
   }) async {
+    final incomingOnProgress = onProgress;
+    onProgress = (terminalModel != null && incomingOnProgress != null)
+        ? ({String? stepLog, String? token, int? tokenCount}) {
+            terminalModel.handleProgress(
+              stepLog: stepLog,
+              token: token,
+              tokenCount: tokenCount,
+            );
+            incomingOnProgress(
+              stepLog: stepLog,
+              token: token,
+              tokenCount: tokenCount,
+            );
+          }
+        : (terminalModel?.progressCallback ?? incomingOnProgress);
     final sw = Stopwatch()..start();
     final now = DateTime.now();
     final prompt = buildSystemPrompt(now, systemPrompt);
@@ -965,6 +1218,48 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       );
       try {
         final uri = Uri.parse(llmEndpoint);
+        final isCompletionApi = uri.path.endsWith('/completion');
+
+        // 1. 若显式指定 /completion 端点，直接走 llama-server 原生接口
+        if (isCompletionApi) {
+          onProgress?.call(stepLog: '[协议] 使用 llama.cpp 原生 /completion 流式接口');
+          final raw = await _requestLlamaServerCompletion(
+            client: client,
+            uri: uri,
+            systemPrompt: prompt,
+            userPrompt: userPrompt,
+            useGbnf: effectiveGbnf,
+            onToken: (tok) {
+              tokenCounter++;
+              onProgress?.call(token: tok, tokenCount: tokenCounter);
+            },
+            onLog: (l) => onProgress?.call(stepLog: l),
+          );
+          if (raw == null || raw.isEmpty) {
+            throw Exception('llama-server 未返回有效响应，请确认后台服务状态');
+          }
+          LocalModelManager.markLoaded(targetModel);
+          sw.stop();
+          final diag = parseAndDiagnoseJson(
+            rawJson: raw,
+            rawText: userPrompt,
+            sourceType: 'prompt_test',
+            deviceOrigin: deviceOrigin,
+          );
+          onProgress?.call(
+            stepLog:
+                '[完成] 推理结束 (${sw.elapsedMilliseconds}ms)，提取到 ${diag.events.length} 个日程事项',
+          );
+          return ExtractionResult(
+            events: diag.events,
+            engineUsed:
+                'llama-server ($targetModel${effectiveGbnf ? " · GBNF" : ""})',
+            elapsedMs: sw.elapsedMilliseconds,
+            promptPreview: prompt,
+            rawResponse: raw,
+            jsonParseError: diag.parseError,
+          );
+        }
 
         Future<HttpClientResponse> sendTestReq({bool fallbackFormat = false}) async {
           final req = await client.postUrl(uri);
@@ -984,6 +1279,52 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         }
 
         var resp = await sendTestReq();
+
+        // 2. 自适应：若请求 404，表明后台是 llama-server，自动无缝重定向至 /completion 接口
+        if (resp.statusCode == 404) {
+          await resp.drain();
+          onProgress?.call(
+            stepLog: '[自适应] 目标为 llama-server 原生端点，自动重定向至 /completion 接口...',
+          );
+          final completionUri = uri.replace(path: '/completion');
+          final raw = await _requestLlamaServerCompletion(
+            client: client,
+            uri: completionUri,
+            systemPrompt: prompt,
+            userPrompt: userPrompt,
+            useGbnf: effectiveGbnf,
+            onToken: (tok) {
+              tokenCounter++;
+              onProgress?.call(token: tok, tokenCount: tokenCounter);
+            },
+            onLog: (l) => onProgress?.call(stepLog: l),
+          );
+          if (raw != null && raw.isNotEmpty) {
+            LocalModelManager.markLoaded(targetModel);
+            sw.stop();
+            final diag = parseAndDiagnoseJson(
+              rawJson: raw,
+              rawText: userPrompt,
+              sourceType: 'prompt_test',
+              deviceOrigin: deviceOrigin,
+            );
+            onProgress?.call(
+              stepLog:
+                  '[完成] 推理结束 (${sw.elapsedMilliseconds}ms)，提取到 ${diag.events.length} 个日程事项',
+            );
+            return ExtractionResult(
+              events: diag.events,
+              engineUsed:
+                  'llama-server ($targetModel${effectiveGbnf ? " · GBNF" : ""})',
+              elapsedMs: sw.elapsedMilliseconds,
+              promptPreview: prompt,
+              rawResponse: raw,
+              jsonParseError: diag.parseError,
+            );
+          }
+          throw Exception('llama-server /completion 未响应数据');
+        }
+
         if (resp.statusCode != 200 && effectiveGbnf) {
           onProgress?.call(
             stepLog: '[兼容] 服务端不支持 Schema 对象格式，自动回退至基础 JSON 格式重试...',

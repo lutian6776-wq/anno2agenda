@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/agenda_event.dart';
 import '../services/ai_extractor_service.dart';
 import '../services/local_model_manager.dart';
+import '../theme/app_theme.dart';
 import '../widgets/agenda_event_card.dart';
 import '../widgets/inference_terminal.dart';
 import 'ai_extract_page.dart';
@@ -28,19 +29,14 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
   final ScrollController _rightScrollController = ScrollController();
   final ScrollController _singleScrollController = ScrollController();
 
-  bool _isTesting = false;
   bool _thinkMode = false;
   bool _useGbnf = true;
   String? _selectedModel;
   List<String> _availableModels = [];
 
-  // 终端实况状态
-  final List<String> _processLogs = [];
-  final StringBuffer _tokenBuffer = StringBuffer();
-  int _tokenCount = 0;
-  double _elapsedSeconds = 0.0;
-  Stopwatch? _stopwatch;
-  Timer? _ticker;
+  // 端侧推理实况模型模组
+  final InferenceTerminalModel _terminalModel = InferenceTerminalModel();
+  bool get _isTesting => _terminalModel.isExtracting;
 
   // 诊断与输出
   String _rawOutput = '';
@@ -67,12 +63,19 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
       if (!_isDirty) setState(() => _isDirty = true);
     });
 
+    _terminalModel.addListener(_onTerminalUpdated);
+
     _loadModels();
+  }
+
+  void _onTerminalUpdated() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    _ticker?.cancel();
+    _terminalModel.removeListener(_onTerminalUpdated);
+    _terminalModel.dispose();
     _promptController.dispose();
     _testTextController.dispose();
     _leftScrollController.dispose();
@@ -130,25 +133,34 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Row(
+        backgroundColor: ctx.appColors.surfaceModal,
+        title: Row(
           children: [
-            Icon(Icons.restart_alt, color: Color(0xFFEF4444)),
-            SizedBox(width: 8),
-            Text('恢复默认提示词'),
+            Icon(Icons.restart_alt, color: ctx.colorScheme.error),
+            const SizedBox(width: 8),
+            Text(
+              '恢复默认提示词',
+              style: TextStyle(color: ctx.appColors.textPrimary),
+            ),
           ],
         ),
-        content: const Text(
+        content: Text(
           '确定要放弃当前对 System Prompt 的修改，恢复为官方内置的标准结构化提取提示词吗？',
+          style: TextStyle(color: ctx.appColors.textSecondary),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+            child: Text(
+              '取消',
+              style: TextStyle(color: ctx.appColors.textSecondary),
+            ),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFEF4444),
+              backgroundColor: ctx.colorScheme.error,
+              foregroundColor: ctx.colorScheme.onError,
             ),
             child: const Text('确认恢复'),
           ),
@@ -184,23 +196,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
       return;
     }
 
-    _stopwatch = Stopwatch()..start();
-    _ticker?.cancel();
-    _ticker = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted && _isTesting) {
-        setState(() {
-          _elapsedSeconds = (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
-        });
-      }
-    });
+    _terminalModel.start();
 
     setState(() {
-      _isTesting = true;
       _hasTested = true;
-      _processLogs.clear();
-      _tokenBuffer.clear();
-      _tokenCount = 0;
-      _elapsedSeconds = 0.0;
       _rawOutput = '';
       _diagnosticError = null;
       _parsedEvents = [];
@@ -213,42 +212,24 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         modelName: _selectedModel,
         thinkMode: _thinkMode,
         useGbnf: _useGbnf,
-        onProgress: ({stepLog, token, tokenCount}) {
-          if (!mounted) return;
-          setState(() {
-            if (stepLog != null) {
-              final now = DateTime.now();
-              final timeStr =
-                  '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}.${(now.millisecond ~/ 100)}';
-              _processLogs.add('[$timeStr] $stepLog');
-            }
-            if (token != null) {
-              _tokenBuffer.write(token);
-              if (tokenCount != null) {
-                _tokenCount = tokenCount;
-              }
-            }
-          });
-        },
+        terminalModel: _terminalModel,
       );
+
+      _terminalModel.finish();
 
       if (!mounted) return;
       setState(() {
-        _rawOutput = result.rawResponse ?? _tokenBuffer.toString();
+        _rawOutput = result.rawResponse ?? _terminalModel.streamedTokens;
         _diagnosticError = result.jsonParseError;
         _parsedEvents = result.events;
       });
     } catch (e) {
+      _terminalModel.recordError(e);
       if (mounted) {
         setState(() {
           _diagnosticError = '测试异常: $e';
-          _processLogs.add('[异常] $e');
         });
       }
-    } finally {
-      _ticker?.cancel();
-      _stopwatch?.stop();
-      if (mounted) setState(() => _isTesting = false);
     }
   }
 
@@ -269,14 +250,19 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Row(
+        backgroundColor: ctx.appColors.surfaceModal,
+        title: Row(
           children: [
-            Icon(Icons.rule_folder_outlined, color: Color(0xFF10B981)),
-            SizedBox(width: 8),
+            Icon(Icons.rule_folder_outlined, color: ctx.appColors.tagWork),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
                 'GBNF (GGML BNF) 强制语法规则',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: ctx.appColors.textPrimary,
+                ),
               ),
             ),
           ],
@@ -287,23 +273,34 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 '在 Token 采样阶段将不符合该 BNF 产生式的候选词概率置为 -∞，从根源杜绝非法键名、Markdown 包裹、类型错误与截断未闭合。',
-                style: TextStyle(fontSize: 12, height: 1.4),
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.4,
+                  color: ctx.appColors.textSecondary,
+                ),
               ),
               const SizedBox(height: 10),
               TextField(
                 controller: gbnfController,
                 maxLines: 14,
-                style: const TextStyle(
+                style: TextStyle(
                   fontFamily: 'monospace',
                   fontSize: 11.5,
                   height: 1.4,
+                  color: ctx.appColors.textPrimary,
                 ),
                 decoration: InputDecoration(
                   filled: true,
+                  fillColor: ctx.appColors.surfaceLow,
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: ctx.appColors.borderSubtle),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: ctx.appColors.borderSubtle),
                   ),
                 ),
               ),
@@ -320,7 +317,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
+            child: Text(
+              '取消',
+              style: TextStyle(color: ctx.appColors.textSecondary),
+            ),
           ),
           FilledButton(
             onPressed: () {
@@ -345,9 +345,8 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final primaryColor =
-        isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB);
+    final appColors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
 
     // 桌面端快捷键映射 (Ctrl+S 保存，Ctrl+Enter 运行测试)
     final shortcuts = <ShortcutActivator, VoidCallback>{
@@ -364,6 +363,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     return CallbackShortcuts(
       bindings: shortcuts,
       child: Scaffold(
+        backgroundColor: appColors.bgBase,
         appBar: AppBar(
           titleSpacing: 12,
           title: Column(
@@ -372,9 +372,13 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
+                  Text(
                     '系统提示词修改与测试',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: appColors.textPrimary,
+                    ),
                   ),
                   if (_isDirty) ...[
                     const SizedBox(width: 8),
@@ -382,15 +386,15 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 6, vertical: 1.5),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                        color: appColors.warningContainer,
                         borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: const Color(0xFFF59E0B)),
+                        border: Border.all(color: appColors.tagStudy),
                       ),
-                      child: const Text(
+                      child: Text(
                         '未保存*',
                         style: TextStyle(
                           fontSize: 10.5,
-                          color: Color(0xFFF59E0B),
+                          color: appColors.tagStudy,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
@@ -402,9 +406,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                 '实时调试 System / User Prompt 与 GBNF 语法约束',
                 style: TextStyle(
                   fontSize: 11,
-                  color: isDark
-                      ? const Color(0xFF94A3B8)
-                      : const Color(0xFF64748B),
+                  color: appColors.textSecondary,
                   fontWeight: FontWeight.normal,
                 ),
               ),
@@ -463,14 +465,17 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                             controller: _leftScrollController,
                             padding: const EdgeInsets.all(16),
                             child: _buildPromptCard(
-                              isDark,
                               primaryColor,
                               isThreeCol: true,
                             ),
                           ),
                         ),
                       ),
-                      const VerticalDivider(width: 1, thickness: 1),
+                      VerticalDivider(
+                        width: 1,
+                        thickness: 1,
+                        color: appColors.borderSubtle,
+                      ),
                       // 第二栏：User Prompt 待测文本与控制面板
                       Expanded(
                         flex: 32,
@@ -484,18 +489,21 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 _buildUserPromptCard(
-                                  isDark,
                                   primaryColor,
                                   isThreeCol: true,
                                 ),
                                 const SizedBox(height: 14),
-                                _buildRunControlsCard(isDark, primaryColor),
+                                _buildRunControlsCard(primaryColor),
                               ],
                             ),
                           ),
                         ),
                       ),
-                      const VerticalDivider(width: 1, thickness: 1),
+                      VerticalDivider(
+                        width: 1,
+                        thickness: 1,
+                        color: appColors.borderSubtle,
+                      ),
                       // 第三栏：推理终端实况、JSON诊断与提取结果
                       Expanded(
                         flex: 42,
@@ -506,7 +514,6 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                             controller: _rightScrollController,
                             padding: const EdgeInsets.all(16),
                             child: _buildOutputDiagnosticSection(
-                              isDark,
                               primaryColor,
                               terminalMaxHeight:
                                   (height - 180).clamp(340.0, 560.0),
@@ -537,17 +544,21 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _buildPromptCard(isDark, primaryColor),
+                            _buildPromptCard(primaryColor),
                             const SizedBox(height: 14),
-                            _buildUserPromptCard(isDark, primaryColor),
+                            _buildUserPromptCard(primaryColor),
                             const SizedBox(height: 14),
-                            _buildRunControlsCard(isDark, primaryColor),
+                            _buildRunControlsCard(primaryColor),
                           ],
                         ),
                       ),
                     ),
                   ),
-                  const VerticalDivider(width: 1, thickness: 1),
+                  VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: appColors.borderSubtle,
+                  ),
                   Expanded(
                     flex: 6,
                     child: Scrollbar(
@@ -557,7 +568,6 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                         controller: _rightScrollController,
                         padding: const EdgeInsets.all(16),
                         child: _buildOutputDiagnosticSection(
-                          isDark,
                           primaryColor,
                           terminalMaxHeight:
                               (height - 200).clamp(340.0, 560.0),
@@ -580,16 +590,15 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildPromptCard(isDark, primaryColor),
+                      _buildPromptCard(primaryColor),
                       const SizedBox(height: 12),
-                      _buildUserPromptCard(isDark, primaryColor),
+                      _buildUserPromptCard(primaryColor),
                       const SizedBox(height: 12),
-                      _buildRunControlsCard(isDark, primaryColor),
+                      _buildRunControlsCard(primaryColor),
                       const SizedBox(height: 16),
-                      const Divider(),
+                      Divider(color: appColors.borderSubtle),
                       const SizedBox(height: 12),
                       _buildOutputDiagnosticSection(
-                        isDark,
                         primaryColor,
                         terminalMaxHeight: 340,
                       ),
@@ -606,16 +615,17 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
 
   /// 1. 构建 System Prompt 编辑卡片
   Widget _buildPromptCard(
-    bool isDark,
     Color primaryColor, {
     bool isThreeCol = false,
   }) {
+    final appColors = context.appColors;
     return Card(
+      color: appColors.surfaceCard,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: BorderSide(
-          color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+          color: appColors.borderSubtle,
         ),
       ),
       child: Padding(
@@ -634,10 +644,13 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   children: [
                     Icon(Icons.terminal, color: primaryColor, size: 18),
                     const SizedBox(width: 6),
-                    const Text(
+                    Text(
                       'System Prompt (系统指令模板)',
-                      style:
-                          TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: appColors.textPrimary,
+                      ),
                     ),
                   ],
                 ),
@@ -673,7 +686,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               '说明：用于约束模型生成严格的 events 结构化日程。可插入 {TIME_ANCHOR} 宏自动注入当前系统时间供模型换算“明天/下周”。',
               style: TextStyle(
                 fontSize: 11.5,
-                color: isDark ? const Color(0xFF94A3B8) : Colors.grey.shade600,
+                color: appColors.textSecondary,
                 height: 1.4,
               ),
             ),
@@ -681,22 +694,25 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             TextField(
               controller: _promptController,
               maxLines: isThreeCol ? 16 : 11,
-              style: const TextStyle(
+              style: TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 12,
                 height: 1.45,
+                color: appColors.textPrimary,
               ),
               decoration: InputDecoration(
                 filled: true,
-                fillColor: isDark
-                    ? const Color(0xFF0F172A)
-                    : const Color(0xFFF8FAFC),
+                fillColor: appColors.surfaceLow,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(
-                    color: isDark
-                        ? const Color(0xFF334155)
-                        : const Color(0xFFCBD5E1),
+                    color: appColors.borderSubtle,
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: appColors.borderSubtle,
                   ),
                 ),
               ),
@@ -709,9 +725,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   '${_promptController.text.length} 字符',
                   style: TextStyle(
                     fontSize: 11,
-                    color: isDark
-                        ? const Color(0xFF64748B)
-                        : Colors.grey.shade500,
+                    color: appColors.textTertiary,
                   ),
                 ),
               ],
@@ -724,16 +738,17 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
 
   /// 2. 构建 User Prompt 测试样本卡片
   Widget _buildUserPromptCard(
-    bool isDark,
     Color primaryColor, {
     bool isThreeCol = false,
   }) {
+    final appColors = context.appColors;
     return Card(
+      color: appColors.surfaceCard,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: BorderSide(
-          color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+          color: appColors.borderSubtle,
         ),
       ),
       child: Padding(
@@ -753,10 +768,13 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                     Icon(Icons.description_outlined,
                         color: primaryColor, size: 18),
                     const SizedBox(width: 6),
-                    const Text(
+                    Text(
                       'User Prompt (待测通知文本)',
-                      style:
-                          TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: appColors.textPrimary,
+                      ),
                     ),
                   ],
                 ),
@@ -765,6 +783,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   children: [
                     PopupMenuButton<int>(
                       tooltip: '填入典型测试通知示例',
+                      color: appColors.surfaceModal,
                       icon: const Icon(Icons.smart_display_outlined, size: 18),
                       onSelected: (idx) {
                         final sample =
@@ -779,7 +798,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                             value: i,
                             child: Text(
                               AIExtractPage.sampleAnnouncements[i]['label']!,
-                              style: const TextStyle(fontSize: 12.5),
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: appColors.textPrimary,
+                              ),
                             ),
                           ),
                       ],
@@ -812,18 +834,22 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             TextField(
               controller: _testTextController,
               maxLines: isThreeCol ? 6 : 5,
+              style: TextStyle(color: appColors.textPrimary),
               decoration: InputDecoration(
                 hintText: '输入或粘贴用于测试的群通知、调课或会议通知...',
+                hintStyle: TextStyle(color: appColors.textTertiary),
                 filled: true,
-                fillColor: isDark
-                    ? const Color(0xFF0F172A)
-                    : const Color(0xFFF8FAFC),
+                fillColor: appColors.surfaceLow,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(
-                    color: isDark
-                        ? const Color(0xFF334155)
-                        : const Color(0xFFCBD5E1),
+                    color: appColors.borderSubtle,
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: appColors.borderSubtle,
                   ),
                 ),
               ),
@@ -835,40 +861,54 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
   }
 
   /// 3. 构建运行控制与参数配置卡片
-  Widget _buildRunControlsCard(bool isDark, Color primaryColor) {
+  Widget _buildRunControlsCard(Color primaryColor) {
+    final appColors = context.appColors;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+        color: appColors.surfaceLow,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color:
-              isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+          color: appColors.borderSubtle,
         ),
       ),
       child: Column(
         children: [
           Row(
             children: [
-              const Icon(Icons.memory, size: 18),
+              Icon(Icons.memory, size: 18, color: appColors.textPrimary),
               const SizedBox(width: 8),
-              const Text('选择模型:',
-                  style:
-                      TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+              Text(
+                '选择模型:',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: appColors.textPrimary,
+                ),
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: DropdownButtonHideUnderline(
                   child: DropdownButton<String>(
                     value: _selectedModel,
+                    dropdownColor: appColors.surfaceModal,
                     isDense: true,
                     isExpanded: true,
-                    hint: const Text('未检测到本地模型'),
+                    hint: Text(
+                      '未检测到本地模型',
+                      style: TextStyle(color: appColors.textTertiary),
+                    ),
                     items: _availableModels.map((m) {
                       return DropdownMenuItem(
                         value: m,
-                        child: Text(m,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12.5)),
+                        child: Text(
+                          m,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: appColors.textPrimary,
+                          ),
+                        ),
                       );
                     }).toList(),
                     onChanged: (val) {
@@ -879,20 +919,34 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               ),
             ],
           ),
-          const Divider(height: 14),
+          Divider(height: 14, color: appColors.borderSubtle),
           Row(
             children: [
-              const Icon(Icons.psychology_outlined, size: 18),
+              Icon(
+                Icons.psychology_outlined,
+                size: 18,
+                color: appColors.textPrimary,
+              ),
               const SizedBox(width: 8),
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('深度思考 (Think Mode)',
-                        style: TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.bold)),
-                    Text('输出思维链。关掉则强制直出纯 JSON',
-                        style: TextStyle(fontSize: 11, color: Colors.grey)),
+                    Text(
+                      '深度思考 (Think Mode)',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: appColors.textPrimary,
+                      ),
+                    ),
+                    Text(
+                      '输出思维链。关掉则强制直出纯 JSON',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.textSecondary,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -902,11 +956,14 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               ),
             ],
           ),
-          const Divider(height: 14),
+          Divider(height: 14, color: appColors.borderSubtle),
           Row(
             children: [
-              const Icon(Icons.verified_user_outlined,
-                  size: 18, color: Color(0xFF10B981)),
+              Icon(
+                Icons.verified_user_outlined,
+                size: 18,
+                color: appColors.tagWork,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(
@@ -914,21 +971,26 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   children: [
                     Row(
                       children: [
-                        const Text('GBNF 强制语法约束',
-                            style: TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.bold)),
+                        Text(
+                          'GBNF 强制语法约束',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: appColors.textPrimary,
+                          ),
+                        ),
                         const SizedBox(width: 6),
                         InkWell(
                           onTap: _showGbnfInspectorDialog,
                           borderRadius: BorderRadius.circular(4),
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
                                 horizontal: 4, vertical: 2),
                             child: Text(
                               '查看/编辑 GBNF',
                               style: TextStyle(
                                 fontSize: 11,
-                                color: Color(0xFF2563EB),
+                                color: primaryColor,
                                 decoration: TextDecoration.underline,
                               ),
                             ),
@@ -936,9 +998,12 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                         ),
                       ],
                     ),
-                    const Text(
+                    Text(
                       '在采样层强制锁定 events 结构与 ISO-8601 时间格式',
-                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: appColors.textSecondary,
+                      ),
                     ),
                   ],
                 ),
@@ -961,12 +1026,12 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             child: FilledButton.icon(
               onPressed: _isTesting ? null : _runPromptTest,
               icon: _isTesting
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: Colors.white,
+                        color: context.colorScheme.onPrimary,
                       ),
                     )
                   : const Icon(Icons.play_arrow_rounded),
@@ -984,12 +1049,11 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
 
   /// 4. 构建右侧/下方的推理实况终端与格式诊断输出区域
   Widget _buildOutputDiagnosticSection(
-    bool isDark,
     Color primaryColor, {
     required double terminalMaxHeight,
   }) {
-    final hasTerminalContent =
-        _processLogs.isNotEmpty || _tokenBuffer.isNotEmpty || _isTesting;
+    final appColors = context.appColors;
+    final hasTerminalContent = _terminalModel.hasContent;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1000,11 +1064,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
             decoration: BoxDecoration(
-              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
+              color: appColors.surfaceCard,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color:
-                    isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                color: appColors.borderSubtle,
               ),
             ),
             child: Column(
@@ -1015,9 +1078,13 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   color: primaryColor.withValues(alpha: 0.8),
                 ),
                 const SizedBox(height: 12),
-                const Text(
+                Text(
                   '端侧推理实况与 JSON 诊断就绪',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: appColors.textPrimary,
+                  ),
                 ),
                 const SizedBox(height: 6),
                 Text(
@@ -1025,9 +1092,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
-                    color: isDark
-                        ? const Color(0xFF94A3B8)
-                        : Colors.grey.shade600,
+                    color: appColors.textSecondary,
                     height: 1.45,
                   ),
                 ),
@@ -1040,11 +1105,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         // 1. 端侧推理实况终端（自适应高度）
         if (hasTerminalContent) ...[
           InferenceTerminal(
-            isExtracting: _isTesting,
-            processLogs: _processLogs,
-            streamedTokens: _tokenBuffer.toString(),
-            tokenCount: _tokenCount,
-            elapsedSeconds: _elapsedSeconds,
+            model: _terminalModel,
             maxHeight: terminalMaxHeight,
             initialExpanded: true,
           ),
@@ -1053,18 +1114,19 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         // 2. JSON 结构化诊断卡片
         if (_hasTested) ...[
           const SizedBox(height: 4),
-          _buildDiagnosticCard(isDark),
+          _buildDiagnosticCard(),
           const SizedBox(height: 12),
         ],
 
         // 3. 原始返回输出折叠卡片 (Raw Output)
         if (_rawOutput.isNotEmpty) ...[
           Card(
+            color: appColors.surfaceCard,
             elevation: 0,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
               side: BorderSide(
-                color: isDark ? const Color(0xFF334155) : Colors.grey.shade200,
+                color: appColors.borderSubtle,
               ),
             ),
             child: Padding(
@@ -1078,16 +1140,22 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                     spacing: 8,
                     runSpacing: 4,
                     children: [
-                      const Row(
+                      Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.data_object,
-                              size: 16, color: Color(0xFF10B981)),
-                          SizedBox(width: 6),
+                          Icon(
+                            Icons.data_object,
+                            size: 16,
+                            color: appColors.tagWork,
+                          ),
+                          const SizedBox(width: 6),
                           Text(
                             '模型生成原始全文 (Raw Output)',
                             style: TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.bold),
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: appColors.textPrimary,
+                            ),
                           ),
                         ],
                       ),
@@ -1107,24 +1175,21 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: isDark
-                          ? const Color(0xFF0F172A)
-                          : const Color(0xFFF8FAFC),
+                      color: appColors.surfaceLow,
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: isDark
-                            ? const Color(0xFF1E293B)
-                            : const Color(0xFFE2E8F0),
+                        color: appColors.borderSubtle,
                       ),
                     ),
                     constraints: const BoxConstraints(maxHeight: 200),
                     child: SingleChildScrollView(
                       child: SelectableText(
                         _rawOutput,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 11,
                           height: 1.4,
+                          color: appColors.textPrimary,
                         ),
                       ),
                     ),
@@ -1140,13 +1205,19 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         if (_parsedEvents.isNotEmpty) ...[
           Row(
             children: [
-              const Icon(Icons.event_available,
-                  color: Color(0xFF10B981), size: 18),
+              Icon(
+                Icons.event_available,
+                color: appColors.tagWork,
+                size: 18,
+              ),
               const SizedBox(width: 6),
               Text(
                 '提取出的结构化日程草稿 (${_parsedEvents.length})',
-                style:
-                    const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: appColors.textPrimary,
+                ),
               ),
             ],
           ),
@@ -1180,24 +1251,29 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
   }
 
   /// 5. 构建 JSON 格式与有效性诊断状态卡片
-  Widget _buildDiagnosticCard(bool isDark) {
+  Widget _buildDiagnosticCard() {
+    final appColors = context.appColors;
     final hasEvents = _parsedEvents.isNotEmpty;
     final hasError = _diagnosticError != null;
 
     final Color statusColor;
+    final Color containerColor;
     final IconData statusIcon;
     final String statusTitle;
 
     if (hasEvents && !hasError) {
-      statusColor = const Color(0xFF10B981);
+      statusColor = appColors.tagWork;
+      containerColor = appColors.successContainer;
       statusIcon = Icons.check_circle;
       statusTitle = '严格标准 JSON · 成功提取出 ${_parsedEvents.length} 项日程';
     } else if (hasEvents && hasError) {
-      statusColor = const Color(0xFFF59E0B);
+      statusColor = appColors.tagStudy;
+      containerColor = appColors.warningContainer;
       statusIcon = Icons.warning_amber_rounded;
       statusTitle = '容错提取成功 (共 ${_parsedEvents.length} 项)，但 JSON 格式存在缺陷';
     } else {
-      statusColor = const Color(0xFFEF4444);
+      statusColor = context.colorScheme.error;
+      containerColor = appColors.errorContainer;
       statusIcon = Icons.error_outline;
       statusTitle = 'JSON 解析失败 · 未能提取出有效日程';
     }
@@ -1206,7 +1282,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: statusColor.withValues(alpha: isDark ? 0.15 : 0.08),
+        color: containerColor,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: statusColor.withValues(alpha: 0.4)),
       ),
@@ -1235,8 +1311,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               '诊断详情: $_diagnosticError',
               style: TextStyle(
                 fontSize: 11.5,
-                color:
-                    isDark ? const Color(0xFFE2E8F0) : const Color(0xFF334155),
+                color: appColors.textPrimary,
                 height: 1.4,
               ),
             ),
@@ -1247,7 +1322,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
               '2. “必须以 {"events": 开头，以 ]} 结尾”。',
               style: TextStyle(
                 fontSize: 11,
-                color: isDark ? const Color(0xFF94A3B8) : Colors.grey.shade700,
+                color: appColors.textSecondary,
                 height: 1.35,
               ),
             ),

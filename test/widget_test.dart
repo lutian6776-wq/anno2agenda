@@ -39,7 +39,7 @@ void main() {
       await tester.pumpWidget(const Anno2AgendaApp());
       await tester.pumpAndSettle();
       expect(find.textContaining('知程 Anno2Agenda'), findsOneWidget);
-      expect(find.text('AI 提取结构化日程'), findsOneWidget);
+      expect(find.text('AI 提取'), findsWidgets);
     }
     await tester.binding.setSurfaceSize(null);
   });

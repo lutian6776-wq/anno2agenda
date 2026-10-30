@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:llama_flutter_android/llama_flutter_android.dart';
+import 'ai_extractor_service.dart';
 
 /// 预置的端侧量化 GGUF 模型规格（对接阿里云魔搭社区 ModelScope 国内高速直链）
 class BuiltInModelSpec {
@@ -75,8 +77,33 @@ class LocalModelManager {
   ];
 
   static Process? _managedRuntimeProcess;
-  static bool _isCancelled = false;
   static String? _cachedAndroidModelsDir;
+
+  /// 正在进行的模型下载任务进度跟踪表 (modelId -> ModelDownloadProgress)
+  static final Map<String, ModelDownloadProgress> _activeDownloads = {};
+  static Map<String, ModelDownloadProgress> get activeDownloads =>
+      Map.unmodifiable(_activeDownloads);
+
+  /// 模型下载任务状态变更通知器 (用于多组件、跨页面以及多次打开弹窗时持续同步进度与速度)
+  static final ValueNotifier<Map<String, ModelDownloadProgress>>
+      activeDownloadsNotifier =
+          ValueNotifier<Map<String, ModelDownloadProgress>>({});
+
+  /// 被主动取消/暂停的模型下载 ID 集合（支持独立按模型取消，互不干扰打扰）
+  static final Set<String> _cancelledModelIds = {};
+
+  /// 正在进行下载的网络客户端 (modelId -> HttpClient)
+  static final Map<String, HttpClient> _downloadHttpClients = {};
+
+  /// 检查指定模型当前是否正在下载中
+  static bool isModelDownloading(String modelId) {
+    final p = _activeDownloads[modelId];
+    return p != null && !p.isCompleted && p.error == null;
+  }
+
+  /// 获取指定模型的当前下载进度
+  static ModelDownloadProgress? getDownloadProgress(String modelId) =>
+      _activeDownloads[modelId];
 
   /// Android 端内嵌 llama.cpp 原生控制器（基于 ARM64 NEON + Vulkan GPU）
   static LlamaController? _androidLlamaController;
@@ -96,6 +123,23 @@ class LocalModelManager {
 
   /// 设置项：展开悬浮窗时是否提前自动预热模型
   static bool autoPreloadOnOverlayExpand = true;
+
+  /// 高级设置项：模型上下文大小（默认 4096）
+  static int contextSize = 4096;
+
+  /// 高级设置项：思考与生成 Token 上限（默认 1024）
+  static int maxThinkingTokens = 1024;
+
+  /// 高级设置项：采样温度（默认 0.1）
+  static double temperature = 0.1;
+
+  /// 高级设置项：核采样阈值 Top-P（默认 0.85）
+  static double topP = 0.85;
+
+  /// 高级设置项：重复词惩罚 Repeat Penalty（默认 1.05）
+  static double repeatPenalty = 1.05;
+
+  static int? _loadedContextSize;
 
   /// 空闲释放定时器与外部通知回调
   static Timer? _idleTimer;
@@ -176,7 +220,9 @@ class LocalModelManager {
         final controller = _androidLlamaController!;
         final alreadyLoaded = await controller.isModelLoaded();
 
-        if (!alreadyLoaded || _loadedAndroidModelPath != ggufFile.path) {
+        if (!alreadyLoaded ||
+            _loadedAndroidModelPath != ggufFile.path ||
+            _loadedContextSize != contextSize) {
           if (alreadyLoaded) {
             await controller.dispose();
             _androidLlamaController = LlamaController();
@@ -192,10 +238,11 @@ class LocalModelManager {
           await _androidLlamaController!.loadModel(
             modelPath: ggufFile.path,
             threads: 6,
-            contextSize: 4096,
+            contextSize: contextSize,
             gpuLayers: gpuLayers,
           );
           _loadedAndroidModelPath = ggufFile.path;
+          _loadedContextSize = contextSize;
         }
 
         _currentlyLoadedModelId =
@@ -222,7 +269,15 @@ class LocalModelManager {
             'keep_alive': '${idleUnloadMinutes > 0 ? idleUnloadMinutes : 60}m',
           })));
           final resp = await req.close();
-          await resp.drain();
+          if (resp.statusCode == 404) {
+            await resp.drain();
+            // 兼容 llama-server: 检测 /health 探活
+            final healthReq = await client.getUrl(Uri.parse('http://127.0.0.1:11434/health'));
+            final healthResp = await healthReq.close();
+            await healthResp.drain();
+          } else {
+            await resp.drain();
+          }
         } catch (_) {} finally {
           client.close();
         }
@@ -262,11 +317,20 @@ class LocalModelManager {
           _androidLlamaController = null;
         }
         _loadedAndroidModelPath = null;
+        _loadedContextSize = null;
         _currentlyLoadedModelId = null;
         onModelStatusChanged?.call('🗑️ $reason（已释放手机 RAM）');
         return true;
       } else if (Platform.isWindows) {
-        // 先查询当前常驻在显存/内存中的模型列表
+        // 若存在知程拉起的独立 llama-server 进程，直接终止以彻底释放 GPU/RAM
+        if (_managedRuntimeProcess != null) {
+          try {
+            _managedRuntimeProcess!.kill();
+          } catch (_) {}
+          _managedRuntimeProcess = null;
+        }
+
+        // 先查询当前常驻在显存/内存中的模型列表（针对外部 Ollama）
         final activeList = await queryActiveMemoryModels();
         final targets = <String>{...activeList};
         if (_currentlyLoadedModelId != null) {
@@ -302,6 +366,27 @@ class LocalModelManager {
     _cachedAndroidModelsDir = path;
   }
 
+  /// 寻找本地打包自带的 llama-server.exe（支持安装包同级、运行目录以及向上查找工程根目录）
+  static File? findBundledLlamaServer() {
+    if (!Platform.isWindows) return null;
+    final candidates = <String>[
+      '${File(Platform.resolvedExecutable).parent.path}\\runtime\\llama-server.exe',
+      '${Directory.current.path}\\runtime\\llama-server.exe',
+    ];
+    var probeDir = Directory.current;
+    for (var i = 0; i < 5; i++) {
+      candidates.add('${probeDir.path}\\runtime\\llama-server.exe');
+      final parent = probeDir.parent;
+      if (parent.path == probeDir.path) break;
+      probeDir = parent;
+    }
+    for (final p in candidates) {
+      final f = File(p);
+      if (f.existsSync()) return f;
+    }
+    return null;
+  }
+
   /// 获取本地 `.gguf` 模型存放目录（支持直接将模型放入该目录制作绿色离线完整版）
   static Future<Directory> getModelsDirectory() async {
     if (Platform.isAndroid) {
@@ -313,12 +398,42 @@ class LocalModelManager {
       }
       return dir;
     } else {
-      final dir = Directory(
-          '${Directory.current.path}${Platform.pathSeparator}models');
-      if (!dir.existsSync()) {
-        await dir.create(recursive: true);
+      // 1. 优先探测可执行文件同级 models
+      final exeParent = File(Platform.resolvedExecutable).parent.path;
+      final exeModels = Directory('$exeParent${Platform.pathSeparator}models');
+      if (exeModels.existsSync() &&
+          exeModels.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
+        return exeModels;
       }
-      return dir;
+
+      // 2. 探测当前运行工作目录 models
+      final curModels =
+          Directory('${Directory.current.path}${Platform.pathSeparator}models');
+      if (curModels.existsSync() &&
+          curModels.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
+        return curModels;
+      }
+
+      // 3. 向上逐级回溯寻找包含 GGUF 模型的 models 目录（例如从 build/windows/Release 回溯到根目录）
+      var probeDir = Directory.current;
+      for (var i = 0; i < 5; i++) {
+        final candidate =
+            Directory('${probeDir.path}${Platform.pathSeparator}models');
+        if (candidate.existsSync() &&
+            candidate.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
+          return candidate;
+        }
+        final parent = probeDir.parent;
+        if (parent.path == probeDir.path) break;
+        probeDir = parent;
+      }
+
+      // 若未找到已有模型目录，优先返回已有目录或当前工作目录 models
+      if (exeModels.existsSync()) return exeModels;
+      if (!curModels.existsSync()) {
+        await curModels.create(recursive: true);
+      }
+      return curModels;
     }
   }
 
@@ -419,7 +534,9 @@ class LocalModelManager {
 
       // 若尚未加载模型或切换了不同模型，则先加载 GGUF 权重并常驻内存
       final alreadyLoaded = await controller.isModelLoaded();
-      if (!alreadyLoaded || _loadedAndroidModelPath != ggufFile.path) {
+      if (!alreadyLoaded ||
+          _loadedAndroidModelPath != ggufFile.path ||
+          _loadedContextSize != contextSize) {
         _isModelLoading = true;
         try {
           if (alreadyLoaded) {
@@ -437,10 +554,11 @@ class LocalModelManager {
           await _androidLlamaController!.loadModel(
             modelPath: ggufFile.path,
             threads: 6,
-            contextSize: 4096,
+            contextSize: contextSize,
             gpuLayers: gpuLayers,
           );
           _loadedAndroidModelPath = ggufFile.path;
+          _loadedContextSize = contextSize;
         } finally {
           _isModelLoading = false;
         }
@@ -509,7 +627,7 @@ class LocalModelManager {
             '$sanitizedUserPrompt<|im_end|>\n'
             '<|im_start|>assistant\n';
         buffer = StringBuffer();
-        maxTokensToGen = 1024;
+        maxTokensToGen = maxThinkingTokens;
       }
 
       final completer = Completer<String>();
@@ -519,9 +637,9 @@ class LocalModelManager {
           .generate(
             prompt: fullPrompt,
             maxTokens: maxTokensToGen,
-            temperature: 0.1,
-            topP: 0.85,
-            repeatPenalty: 1.05,
+            temperature: temperature,
+            topP: topP,
+            repeatPenalty: repeatPenalty,
           )
           .listen(
         (token) {
@@ -547,23 +665,152 @@ class LocalModelManager {
         },
       );
 
+      String rawOut = '';
       try {
-        final rawOut = await completer.future
+        rawOut = await completer.future
             .timeout(Duration(seconds: isThink ? 180 : 120));
-        await sub.cancel();
-        markActivity();
-        return _cleanModelJsonOutput(rawOut);
       } catch (_) {
-        await sub.cancel();
         try {
           await _androidLlamaController?.stop();
         } catch (_) {}
-        final partial = buffer.toString().trim();
-        if (partial.length > 15) {
-          return _cleanModelJsonOutput(partial);
-        }
-        return null;
+        rawOut = buffer.toString();
+      } finally {
+        await sub.cancel();
       }
+
+      markActivity();
+
+      // 🚨 思考截断抢救机制（Prefill Rescue）：
+      // 当开启深度思考，但因达到最大 Token 上限或超时被截断，导致没有完整输出 </think> 或未能输出完整 JSON
+      if (isThink) {
+        final currentText = rawOut.isNotEmpty ? rawOut : buffer.toString();
+        final thinkEnd = currentText.indexOf('</think>');
+        final bool hasUnclosedThink =
+            currentText.contains('<think>') && thinkEnd == -1;
+        final bool jsonMissingAfterThink = thinkEnd != -1 &&
+            !currentText.substring(thinkEnd + '</think>'.length).contains('}');
+
+        if (hasUnclosedThink || jsonMissingAfterThink) {
+          String thinkContent = '';
+          if (hasUnclosedThink) {
+            final tStart = currentText.indexOf('<think>');
+            thinkContent = currentText.substring(tStart + '<think>'.length).trim();
+          } else {
+            final tStart = currentText.indexOf('<think>');
+            thinkContent = currentText
+                .substring(
+                    tStart != -1 ? tStart + '<think>'.length : 0, thinkEnd)
+                .trim();
+          }
+
+          thinkContent = thinkContent
+              .replaceAll('<|im_end|>', '')
+              .replaceAll('<|endoftext|>', '')
+              .trim();
+
+          // 保护 Prompt 不至于溢出上下文，若思考过长保留最有价值的后半段推论
+          if (thinkContent.length > 2500) {
+            thinkContent =
+                '...[前略]\n${thinkContent.substring(thinkContent.length - 2000)}';
+          }
+
+          onToken?.call(
+            '\n\n[知程调度] ⚠️ 思考预算耗尽，自动闭合思维链并强制直出日程 JSON...\n{"events":[',
+          );
+
+          const jsonPrefill = '{"events":[';
+          final rescuePrompt = '<|im_start|>system\n'
+              '$systemPrompt<|im_end|>\n'
+              '<|im_start|>user\n'
+              '$sanitizedUserPrompt<|im_end|>\n'
+              '<|im_start|>assistant\n'
+              '<think>\n'
+              '$thinkContent\n'
+              '</think>\n'
+              '$jsonPrefill';
+
+          try {
+            if (_androidLlamaController!.isGenerating) {
+              await _androidLlamaController!.stop();
+            }
+            try {
+              await controller.clearContext();
+            } catch (_) {}
+
+            // 注册针对续写的 GBNF 语法机（强制从内部字段开始闭合）
+            try {
+              await controller.unregisterCustomTemplate('__gbnf_grammar_lazy__');
+              await controller.registerCustomTemplate(
+                '__gbnf_grammar__',
+                AIExtractorService.prefilledAgendaGbnfGrammar.trim(),
+              );
+            } catch (_) {}
+
+            final rescueBuffer = StringBuffer(jsonPrefill);
+            final rescueCompleter = Completer<String>();
+            StreamSubscription<String>? rescueSub;
+
+            rescueSub = controller
+                .generate(
+                  prompt: rescuePrompt,
+                  maxTokens: 512,
+                  temperature: 0.1,
+                  topP: 0.85,
+                  repeatPenalty: 1.05,
+                )
+                .listen(
+              (tok) {
+                rescueBuffer.write(tok);
+                onToken?.call(tok);
+                final cur = rescueBuffer.toString();
+                if (cur.contains('<|im_end|>') ||
+                    cur.contains('<|endoftext|>')) {
+                  _androidLlamaController?.stop();
+                  if (!rescueCompleter.isCompleted) {
+                    rescueCompleter.complete(cur);
+                  }
+                }
+              },
+              onDone: () {
+                if (!rescueCompleter.isCompleted) {
+                  rescueCompleter.complete(rescueBuffer.toString());
+                }
+              },
+              onError: (e) {
+                if (!rescueCompleter.isCompleted) {
+                  rescueCompleter.completeError(e);
+                }
+              },
+            );
+
+            try {
+              final rescueOut = await rescueCompleter.future
+                  .timeout(const Duration(seconds: 45));
+              await rescueSub.cancel();
+              markActivity();
+              return _cleanModelJsonOutput(rescueOut);
+            } catch (_) {
+              await rescueSub.cancel();
+              try {
+                await _androidLlamaController?.stop();
+              } catch (_) {}
+              final partial = rescueBuffer.toString().trim();
+              if (partial.length > 15) {
+                return _cleanModelJsonOutput(partial);
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (rawOut.isNotEmpty) {
+        return _cleanModelJsonOutput(rawOut);
+      }
+      final partial = buffer.toString().trim();
+      if (partial.length > 15) {
+        return _cleanModelJsonOutput(partial);
+      }
+      return null;
     } finally {
       if (_activeInferenceLock == currentLock) {
         _activeInferenceLock = null;
@@ -651,11 +898,19 @@ class LocalModelManager {
     }
 
     if (Platform.isWindows) {
-      final bundledServer =
-          File('${Directory.current.path}\\runtime\\llama-server.exe');
+      final bundledServer = findBundledLlamaServer();
       final ggufFiles = await listDownloadedGgufFiles();
-      if (bundledServer.existsSync() && ggufFiles.isNotEmpty) {
+      if (bundledServer != null && ggufFiles.isNotEmpty) {
         try {
+          final runtimeDir = bundledServer.parent.path;
+          final cleanEnv = Map<String, String>.from(Platform.environment)
+            ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
+            ..['HTTP_PROXY'] = ''
+            ..['HTTPS_PROXY'] = ''
+            ..['http_proxy'] = ''
+            ..['https_proxy'] = ''
+            ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
+
           _managedRuntimeProcess ??= await Process.start(
             bundledServer.path,
             [
@@ -667,10 +922,21 @@ class LocalModelManager {
               '0.0.0.0',
               '-ngl',
               '99',
+              '-c',
+              '4096',
             ],
+            workingDirectory: runtimeDir,
+            environment: cleanEnv,
             mode: ProcessStartMode.detached,
           );
-          await Future.delayed(const Duration(seconds: 2));
+          // 等待 llama-server 初始化并载入 GPU 显存（模型加载时返回 503，就绪后返回 200）
+          for (var i = 0; i < 20; i++) {
+            await Future.delayed(const Duration(milliseconds: 600));
+            final models = await queryRunningLocalModels();
+            if (models.isNotEmpty) {
+              return models;
+            }
+          }
         } catch (_) {}
       }
 
@@ -707,60 +973,125 @@ class LocalModelManager {
     return queryRunningLocalModels();
   }
 
-  /// 查询本地正在运行的推理引擎（127.0.0.1:11434）中已挂载的模型列表
+  /// 查询本地正在运行的推理引擎（127.0.0.1:11434）中已挂载的模型列表（自适应 Ollama 与 llama-server）
   static Future<List<String>> queryRunningLocalModels({
     String host = '127.0.0.1',
     int port = 11434,
   }) async {
-    final client =
-        createDirectHttpClient(timeout: const Duration(milliseconds: 1200));
+    // 1. 尝试 Ollama: GET /api/tags
+    final client1 =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 1000));
     try {
-      final req = await client.getUrl(Uri.parse('http://$host:$port/api/tags'));
+      final req = await client1.getUrl(Uri.parse('http://$host:$port/api/tags'));
       final resp =
-          await req.close().timeout(const Duration(milliseconds: 1500));
-      if (resp.statusCode != 200) return [];
-      final body = await resp.transform(utf8.decoder).join();
-      final decoded = jsonDecode(body);
-      if (decoded is Map && decoded['models'] is List) {
-        return (decoded['models'] as List)
-            .map((m) => (m as Map)['name']?.toString() ?? '')
-            .where((name) => name.isNotEmpty)
-            .toList();
+          await req.close().timeout(const Duration(milliseconds: 1200));
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final decoded = jsonDecode(body);
+        if (decoded is Map && decoded['models'] is List) {
+          final list = (decoded['models'] as List)
+              .map((m) => (m as Map)['name']?.toString() ?? '')
+              .where((name) => name.isNotEmpty)
+              .toList();
+          if (list.isNotEmpty) return list;
+        }
       }
-      return [];
     } catch (_) {
-      return [];
     } finally {
-      client.close();
+      client1.close();
     }
+
+    // 2. 尝试 llama-server: GET /v1/models (OpenAI 兼容端点)
+    final client2 =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 1000));
+    try {
+      final req = await client2.getUrl(Uri.parse('http://$host:$port/v1/models'));
+      final resp =
+          await req.close().timeout(const Duration(milliseconds: 1200));
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final decoded = jsonDecode(body);
+        if (decoded is Map && decoded['data'] is List) {
+          final list = (decoded['data'] as List)
+              .map((m) => (m as Map)['id']?.toString() ?? '')
+              .where((name) => name.isNotEmpty)
+              .toList();
+          if (list.isNotEmpty) return list;
+        }
+      }
+    } catch (_) {
+    } finally {
+      client2.close();
+    }
+
+    // 3. 尝试 llama-server: GET /health
+    final client3 =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 800));
+    try {
+      final req = await client3.getUrl(Uri.parse('http://$host:$port/health'));
+      final resp =
+          await req.close().timeout(const Duration(milliseconds: 1000));
+      if (resp.statusCode == 200) {
+        final ggufFiles = await listDownloadedGgufFiles();
+        if (ggufFiles.isNotEmpty) {
+          return [ggufFiles.first.path.split(Platform.pathSeparator).last];
+        }
+        return ['llama-server:default'];
+      }
+    } catch (_) {
+    } finally {
+      client3.close();
+    }
+
+    return [];
   }
 
-  /// 查询本地推理引擎（127.0.0.1:11434/api/ps）中当前真实常驻在显存/内存中的活跃模型列表
+  /// 查询本地推理引擎（127.0.0.1:11434）中当前真实常驻在显存/内存中的活跃模型列表
   static Future<List<String>> queryActiveMemoryModels({
     String host = '127.0.0.1',
     int port = 11434,
   }) async {
-    final client =
-        createDirectHttpClient(timeout: const Duration(milliseconds: 1200));
+    // 1. 尝试 Ollama: GET /api/ps
+    final client1 =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 1000));
     try {
-      final req = await client.getUrl(Uri.parse('http://$host:$port/api/ps'));
+      final req = await client1.getUrl(Uri.parse('http://$host:$port/api/ps'));
       final resp =
-          await req.close().timeout(const Duration(milliseconds: 1500));
-      if (resp.statusCode != 200) return [];
-      final body = await resp.transform(utf8.decoder).join();
-      final decoded = jsonDecode(body);
-      if (decoded is Map && decoded['models'] is List) {
-        return (decoded['models'] as List)
-            .map((m) => (m as Map)['name']?.toString() ?? '')
-            .where((name) => name.isNotEmpty)
-            .toList();
+          await req.close().timeout(const Duration(milliseconds: 1200));
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final decoded = jsonDecode(body);
+        if (decoded is Map && decoded['models'] is List) {
+          final list = (decoded['models'] as List)
+              .map((m) => (m as Map)['name']?.toString() ?? '')
+              .where((name) => name.isNotEmpty)
+              .toList();
+          if (list.isNotEmpty) return list;
+        }
       }
-      return [];
     } catch (_) {
-      return [];
     } finally {
-      client.close();
+      client1.close();
     }
+
+    // 2. 尝试 llama-server: 检查 /health。只要为 200，说明挂载模型常驻在内存/显存
+    final client2 =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 800));
+    try {
+      final req = await client2.getUrl(Uri.parse('http://$host:$port/health'));
+      final resp =
+          await req.close().timeout(const Duration(milliseconds: 1000));
+      if (resp.statusCode == 200) {
+        final running = await queryRunningLocalModels(host: host, port: port);
+        if (running.isNotEmpty) return running;
+        return ['llama-server:active'];
+      }
+    } catch (_) {
+    } finally {
+      client2.close();
+    }
+
+    return [];
   }
 
   /// 将应用内一键下载的 `.gguf` 权重自动注册进本地推理引擎，无需用户手动导入
@@ -806,12 +1137,17 @@ class LocalModelManager {
     return spec.fileName;
   }
 
-  /// 一键高速断点续传下载 GGUF 模型权重（对接国内 ModelScope CDN）
+  /// 一键高速断点续传下载 GGUF 模型权重（对接国内 ModelScope CDN，支持多模型并发与单模型独立启停）
   static Future<void> downloadModel({
     required BuiltInModelSpec spec,
-    required void Function(ModelDownloadProgress progress) onProgress,
+    void Function(ModelDownloadProgress progress)? onProgress,
   }) async {
-    _isCancelled = false;
+    // 防止重复触发同个模型的下载任务
+    if (isModelDownloading(spec.id)) {
+      return;
+    }
+
+    _cancelledModelIds.remove(spec.id);
     final dir = await getModelsDirectory();
     final targetFile =
         File('${dir.path}${Platform.pathSeparator}${spec.fileName}');
@@ -822,10 +1158,32 @@ class LocalModelManager {
       existingBytes = tempFile.lengthSync();
     }
 
+    int totalBytes = spec.expectedSizeMB * 1024 * 1024;
+    int received = existingBytes;
+
+    void notifyProgress(ModelDownloadProgress prog) {
+      _activeDownloads[spec.id] = prog;
+      activeDownloadsNotifier.value =
+          Map<String, ModelDownloadProgress>.from(_activeDownloads);
+      onProgress?.call(prog);
+    }
+
+    // 初始状态通知
+    notifyProgress(ModelDownloadProgress(
+      modelId: spec.id,
+      receivedBytes: existingBytes,
+      totalBytes: totalBytes,
+      speedMBps: 0.0,
+    ));
+
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
+    _downloadHttpClients[spec.id] = client;
+    IOSink? sink;
+
     try {
       final req = await client.getUrl(Uri.parse(spec.downloadUrl));
+      req.followRedirects = false;
       req.headers.set(
         HttpHeaders.userAgentHeader,
         'Mozilla/5.0 (Anno2Agenda On-Device AI Downloader)',
@@ -834,7 +1192,33 @@ class LocalModelManager {
         req.headers.set(HttpHeaders.rangeHeader, 'bytes=$existingBytes-');
       }
 
-      final resp = await req.close();
+      var resp = await req.close();
+
+      // 处理 301/302/307 重定向并保留 Range 请求头（确保 ModelScope CDN 正常断点续传）
+      var redirects = 0;
+      while ((resp.statusCode == HttpStatus.movedPermanently ||
+              resp.statusCode == HttpStatus.found ||
+              resp.statusCode == HttpStatus.seeOther ||
+              resp.statusCode == HttpStatus.temporaryRedirect ||
+              resp.statusCode == HttpStatus.permanentRedirect) &&
+          redirects < 5) {
+        final loc = resp.headers.value(HttpHeaders.locationHeader);
+        if (loc == null) break;
+        await resp.drain();
+        final redirectUri = Uri.parse(loc);
+        final redirectReq = await client.getUrl(redirectUri);
+        redirectReq.followRedirects = false;
+        redirectReq.headers.set(
+          HttpHeaders.userAgentHeader,
+          'Mozilla/5.0 (Anno2Agenda On-Device AI Downloader)',
+        );
+        if (existingBytes > 0) {
+          redirectReq.headers.set(HttpHeaders.rangeHeader, 'bytes=$existingBytes-');
+        }
+        resp = await redirectReq.close();
+        redirects++;
+      }
+
       if (resp.statusCode != 200 && resp.statusCode != 206) {
         throw Exception('下载服务器响应异常 (HTTP ${resp.statusCode})');
       }
@@ -842,26 +1226,38 @@ class LocalModelManager {
       final isResumed = resp.statusCode == 206;
       if (!isResumed) {
         existingBytes = 0;
+        received = 0;
       }
 
-      final contentLength = resp.contentLength;
-      final totalBytes = contentLength > 0
-          ? existingBytes + contentLength
-          : spec.expectedSizeMB * 1024 * 1024;
+      final contentRange = resp.headers.value(HttpHeaders.contentRangeHeader);
+      if (contentRange != null && contentRange.contains('/')) {
+        final totalStr = contentRange.split('/').last.trim();
+        final parsed = int.tryParse(totalStr);
+        if (parsed != null && parsed > 0) {
+          totalBytes = parsed;
+        }
+      }
+      if (totalBytes <= existingBytes) {
+        final contentLength = resp.contentLength;
+        totalBytes = contentLength > 0
+            ? (isResumed ? existingBytes + contentLength : contentLength)
+            : spec.expectedSizeMB * 1024 * 1024;
+      }
 
-      final sink = tempFile.openWrite(
+      sink = tempFile.openWrite(
         mode: isResumed ? FileMode.append : FileMode.write,
       );
 
-      int received = existingBytes;
       final sw = Stopwatch()..start();
       int bytesSinceLastTick = 0;
       double currentSpeedMBps = 0.0;
 
       await for (final chunk in resp) {
-        if (_isCancelled) {
-          await sink.close();
-          onProgress(ModelDownloadProgress(
+        if (_cancelledModelIds.contains(spec.id)) {
+          await sink?.close();
+          sink = null;
+          _cancelledModelIds.remove(spec.id);
+          notifyProgress(ModelDownloadProgress(
             modelId: spec.id,
             receivedBytes: received,
             totalBytes: totalBytes,
@@ -871,7 +1267,7 @@ class LocalModelManager {
           return;
         }
 
-        sink.add(chunk);
+        sink?.add(chunk);
         received += chunk.length;
         bytesSinceLastTick += chunk.length;
 
@@ -880,7 +1276,7 @@ class LocalModelManager {
               (sw.elapsedMilliseconds / 1000.0);
           sw.reset();
           bytesSinceLastTick = 0;
-          onProgress(ModelDownloadProgress(
+          notifyProgress(ModelDownloadProgress(
             modelId: spec.id,
             receivedBytes: received,
             totalBytes: totalBytes,
@@ -889,8 +1285,21 @@ class LocalModelManager {
         }
       }
 
-      await sink.flush();
-      await sink.close();
+      await sink?.flush();
+      await sink?.close();
+      sink = null;
+
+      if (_cancelledModelIds.contains(spec.id)) {
+        _cancelledModelIds.remove(spec.id);
+        notifyProgress(ModelDownloadProgress(
+          modelId: spec.id,
+          receivedBytes: received,
+          totalBytes: totalBytes,
+          speedMBps: 0,
+          error: '已暂停下载（下次点击可继续断点续传）',
+        ));
+        return;
+      }
 
       if (targetFile.existsSync()) {
         await targetFile.delete();
@@ -899,28 +1308,67 @@ class LocalModelManager {
 
       await registerDownloadedGgufToRuntime(spec);
 
-      onProgress(ModelDownloadProgress(
+      notifyProgress(ModelDownloadProgress(
         modelId: spec.id,
         receivedBytes: totalBytes,
         totalBytes: totalBytes,
-        speedMBps: currentSpeedMBps,
+        speedMBps: 0.0,
         isCompleted: true,
       ));
+
+      onModelStatusChanged?.call('🎉 ${spec.name} 下载并自动挂载完成！');
     } catch (e) {
-      onProgress(ModelDownloadProgress(
+      try {
+        await sink?.flush();
+        await sink?.close();
+      } catch (_) {}
+
+      if (_cancelledModelIds.contains(spec.id)) {
+        _cancelledModelIds.remove(spec.id);
+        notifyProgress(ModelDownloadProgress(
+          modelId: spec.id,
+          receivedBytes: received,
+          totalBytes: totalBytes,
+          speedMBps: 0,
+          error: '已暂停下载（下次点击可继续断点续传）',
+        ));
+        return;
+      }
+
+      notifyProgress(ModelDownloadProgress(
         modelId: spec.id,
-        receivedBytes: existingBytes,
-        totalBytes: spec.expectedSizeMB * 1024 * 1024,
+        receivedBytes: received,
+        totalBytes: totalBytes,
         speedMBps: 0,
-        error: e.toString(),
+        error: '下载异常: $e',
       ));
     } finally {
-      client.close();
+      _downloadHttpClients.remove(spec.id);
+      _cancelledModelIds.remove(spec.id);
+      try {
+        client.close(force: true);
+      } catch (_) {}
     }
   }
 
-  static void cancelDownload() {
-    _isCancelled = true;
+  /// 取消或暂停模型下载（可传入指定 modelId 进行独立暂停；不传参数则暂停所有下载）
+  static void cancelDownload([String? modelId]) {
+    if (modelId != null) {
+      _cancelledModelIds.add(modelId);
+      final client = _downloadHttpClients[modelId];
+      if (client != null) {
+        try {
+          client.close(force: true);
+        } catch (_) {}
+      }
+    } else {
+      _cancelledModelIds.addAll(_downloadHttpClients.keys);
+      for (final client in _downloadHttpClients.values) {
+        try {
+          client.close(force: true);
+        } catch (_) {}
+      }
+    }
   }
 
   /// 获取某模型未完成断点续传缓存（.part 文件）占用的 MB 大小
@@ -938,7 +1386,10 @@ class LocalModelManager {
 
   /// 删除应用内下载的 GGUF 模型文件（含断点续传缓存），并同步从本地推理运行时移除，释放磁盘空间
   static Future<double> deleteDownloadedModel(BuiltInModelSpec spec) async {
-    _isCancelled = true;
+    cancelDownload(spec.id);
+    _activeDownloads.remove(spec.id);
+    activeDownloadsNotifier.value =
+        Map<String, ModelDownloadProgress>.from(_activeDownloads);
     double freedBytes = 0;
     try {
       final dir = await getModelsDirectory();

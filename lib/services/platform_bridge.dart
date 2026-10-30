@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/agenda_event.dart';
 import '../repositories/agenda_repository.dart';
@@ -27,9 +28,114 @@ class CalendarWriteResult {
   });
 }
 
+/// 系统日历底层删除返回实体
+class CalendarDeleteResult {
+  final bool success;
+  final String message;
+  final int rowsAffected;
+  final bool permissionDenied;
+
+  CalendarDeleteResult({
+    required this.success,
+    required this.message,
+    this.rowsAffected = 0,
+    this.permissionDenied = false,
+  });
+}
+
+/// 从系统日历中读取到的原始事件 DTO
+class SystemCalendarEventDto {
+  final String systemCalendarEventId;
+  final String title;
+  final String description;
+  final String location;
+  final DateTime startTime;
+  final DateTime endTime;
+  final bool allDay;
+  final String calendarId;
+
+  SystemCalendarEventDto({
+    required this.systemCalendarEventId,
+    required this.title,
+    this.description = '',
+    this.location = '',
+    required this.startTime,
+    required this.endTime,
+    this.allDay = false,
+    this.calendarId = '',
+  });
+
+  factory SystemCalendarEventDto.fromMap(Map<dynamic, dynamic> map) {
+    final startMs = (map['startMillis'] as num?)?.toInt() ?? 0;
+    final endMs = (map['endMillis'] as num?)?.toInt() ?? (startMs + 3600000);
+    return SystemCalendarEventDto(
+      systemCalendarEventId: map['systemCalendarEventId']?.toString() ?? '',
+      title: map['title']?.toString() ?? '',
+      description: map['description']?.toString() ?? '',
+      location: map['location']?.toString() ?? '',
+      startTime: DateTime.fromMillisecondsSinceEpoch(startMs),
+      endTime: DateTime.fromMillisecondsSinceEpoch(endMs),
+      allDay: map['allDay'] == true,
+      calendarId: map['calendarId']?.toString() ?? '',
+    );
+  }
+
+  /// 将读取到的系统日历事件转换为知程 AgendaEvent 标准模型
+  AgendaEvent toAgendaEvent() {
+    return AgendaEvent(
+      id: 'syscal_${systemCalendarEventId}_${startTime.millisecondsSinceEpoch}',
+      title: title.isEmpty ? '系统日历事项' : title,
+      startTime: startTime,
+      endTime: endTime,
+      location: location,
+      description: description,
+      sourceText: '从系统日历导入: $title',
+      sourceType: 'system_calendar',
+      reminderMinutes: 30,
+      confidence: 1.0,
+      syncedToSystemCalendar: true,
+      systemCalendarEventId: systemCalendarEventId,
+      deviceOrigin: Platform.isAndroid ? 'android' : 'windows',
+    );
+  }
+}
+
+/// 系统日历账户信息 DTO
+class SystemCalendarAccountDto {
+  final String id;
+  final String accountName;
+  final String accountType;
+  final String displayName;
+  final int color;
+  final bool isPrimary;
+
+  SystemCalendarAccountDto({
+    required this.id,
+    required this.accountName,
+    required this.accountType,
+    required this.displayName,
+    this.color = 0,
+    this.isPrimary = false,
+  });
+
+  factory SystemCalendarAccountDto.fromMap(Map<dynamic, dynamic> map) {
+    return SystemCalendarAccountDto(
+      id: map['id']?.toString() ?? '',
+      accountName: map['accountName']?.toString() ?? '',
+      accountType: map['accountType']?.toString() ?? '',
+      displayName: map['displayName']?.toString() ?? '',
+      color: (map['color'] as num?)?.toInt() ?? 0,
+      isPrimary: map['isPrimary'] == true,
+    );
+  }
+}
+
 class PlatformBridge {
   static const MethodChannel _channel =
       MethodChannel('com.anno2agenda/native');
+
+  /// 仅用于测试：强制走 Native MethodChannel 逻辑（模拟 Android 环境）
+  static bool debugForceNativeChannel = false;
 
   static void Function(IncomingCapturePayload payload)? onExternalCapture;
   static void Function(List<AgendaEvent> events, String engineUsed)?
@@ -173,7 +279,7 @@ class PlatformBridge {
 
   /// 底层写入日历调用（支持返回事件 ID 与细粒度结果）
   static Future<CalendarWriteResult> writeCalendarEvent(AgendaEvent event) async {
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid || debugForceNativeChannel) {
       final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
         'insertCalendarEvent',
         event.toChannelMap(),
@@ -223,6 +329,210 @@ class PlatformBridge {
       throw Exception(res.message);
     }
     return res.message;
+  }
+
+  /// 从系统日历中删除指定事件（实现双向联动同步删除）
+  static Future<CalendarDeleteResult> deleteCalendarEvent(
+      String systemCalendarEventId) async {
+    if (systemCalendarEventId.trim().isEmpty) {
+      return CalendarDeleteResult(
+        success: false,
+        message: '系统日历事件 ID 为空',
+      );
+    }
+
+    if (Platform.isAndroid || debugForceNativeChannel) {
+      try {
+        final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'deleteCalendarEvent',
+          {'systemCalendarEventId': systemCalendarEventId},
+        );
+        final ok = result?['success'] == true;
+        final msg = result?['message']?.toString() ??
+            (ok ? '已从 Android 系统日历删除' : '删除系统日历事件失败');
+        final rows = (result?['rowsAffected'] as num?)?.toInt() ?? (ok ? 1 : 0);
+        final permDenied = result?['permissionDenied'] == true;
+
+        return CalendarDeleteResult(
+          success: ok,
+          message: msg,
+          rowsAffected: rows,
+          permissionDenied: permDenied,
+        );
+      } catch (e) {
+        return CalendarDeleteResult(
+          success: false,
+          message: '删除系统日历事件异常: $e',
+        );
+      }
+    } else if (Platform.isWindows) {
+      try {
+        final exportDir = Directory('${Directory.current.path}\\exported_ics');
+        if (exportDir.existsSync()) {
+          var deletedCount = 0;
+          for (final f in exportDir.listSync()) {
+            if (f is File && f.path.endsWith('.ics')) {
+              if (f.path.contains(systemCalendarEventId)) {
+                f.deleteSync();
+                deletedCount++;
+              }
+            }
+          }
+          return CalendarDeleteResult(
+            success: true,
+            message: '已删除 Windows 导出的 .ics 日历文件 ($deletedCount 项)',
+            rowsAffected: deletedCount,
+          );
+        }
+        return CalendarDeleteResult(
+          success: true,
+          message: '本地日历导出目录不存在，无需清理',
+          rowsAffected: 0,
+        );
+      } catch (e) {
+        return CalendarDeleteResult(
+          success: false,
+          message: '清理 Windows .ics 异常: $e',
+        );
+      }
+    }
+    return CalendarDeleteResult(
+      success: false,
+      message: '当前平台暂不支持联动删除系统日历',
+    );
+  }
+
+  /// 从系统日历中读取指定时间段的所有事件（实现反向读取导入）
+  static Future<List<SystemCalendarEventDto>> fetchSystemCalendarEvents({
+    required DateTime startTime,
+    required DateTime endTime,
+    String? calendarId,
+  }) async {
+    if (Platform.isAndroid || debugForceNativeChannel) {
+      try {
+        final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'getCalendarEvents',
+          {
+            'startMillis': startTime.millisecondsSinceEpoch,
+            'endMillis': endTime.millisecondsSinceEpoch,
+            if (calendarId != null && calendarId.isNotEmpty)
+              'calendarId': calendarId,
+          },
+        );
+        final rawEvents = result?['events'] as List<dynamic>? ?? [];
+        return rawEvents
+            .map((e) => SystemCalendarEventDto.fromMap(
+                Map<dynamic, dynamic>.from(e as Map)))
+            .toList();
+      } catch (e) {
+        debugPrint('[PlatformBridge] 获取系统日历事件失败: $e');
+        return [];
+      }
+    } else if (Platform.isWindows) {
+      try {
+        final list = <SystemCalendarEventDto>[];
+        final exportDir = Directory('${Directory.current.path}\\exported_ics');
+        if (exportDir.existsSync()) {
+          for (final entity in exportDir.listSync()) {
+            if (entity is File && entity.path.endsWith('.ics')) {
+              final content = entity.readAsStringSync();
+              final event = AgendaEvent.fromIcsString(content);
+              if (event != null &&
+                  event.endTime.isAfter(startTime) &&
+                  event.startTime.isBefore(endTime)) {
+                list.add(SystemCalendarEventDto(
+                  systemCalendarEventId: event.id,
+                  title: event.title,
+                  description: event.description,
+                  location: event.location,
+                  startTime: event.startTime,
+                  endTime: event.endTime,
+                  calendarId: 'windows_ics',
+                ));
+              }
+            }
+          }
+        }
+        return list;
+      } catch (e) {
+        debugPrint('[PlatformBridge] 读取 Windows 导出 .ics 失败: $e');
+        return [];
+      }
+    }
+    return [];
+  }
+
+  /// 更新系统日历中的事件
+  static Future<CalendarWriteResult> updateCalendarEvent(
+      AgendaEvent event) async {
+    if (event.systemCalendarEventId == null ||
+        event.systemCalendarEventId!.isEmpty) {
+      return writeCalendarEvent(event);
+    }
+
+    if (Platform.isAndroid || debugForceNativeChannel) {
+      try {
+        final map = event.toChannelMap();
+        map['eventId'] = event.systemCalendarEventId;
+        final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'updateCalendarEvent',
+          map,
+        );
+        final ok = result?['success'] == true;
+        final msg = result?['message']?.toString() ??
+            (ok ? '已更新 Android 系统日历' : '更新系统日历失败');
+        final permDenied = result?['permissionDenied'] == true;
+
+        return CalendarWriteResult(
+          success: ok,
+          message: msg,
+          systemCalendarEventId: event.systemCalendarEventId,
+          permissionDenied: permDenied,
+        );
+      } catch (e) {
+        return CalendarWriteResult(
+          success: false,
+          message: '更新系统日历异常: $e',
+          systemCalendarEventId: event.systemCalendarEventId,
+        );
+      }
+    } else if (Platform.isWindows) {
+      return writeCalendarEvent(event);
+    }
+    return CalendarWriteResult(
+      success: false,
+      message: '当前平台暂不支持更新系统日历',
+    );
+  }
+
+  /// 查询系统可用日历账户
+  static Future<List<SystemCalendarAccountDto>> getSystemCalendars() async {
+    if (Platform.isAndroid || debugForceNativeChannel) {
+      try {
+        final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'getSystemCalendars',
+        );
+        final rawList = result?['calendars'] as List<dynamic>? ?? [];
+        return rawList
+            .map((c) => SystemCalendarAccountDto.fromMap(
+                Map<dynamic, dynamic>.from(c as Map)))
+            .toList();
+      } catch (e) {
+        debugPrint('[PlatformBridge] 获取日历账户列表失败: $e');
+        return [];
+      }
+    } else if (Platform.isWindows) {
+      return [
+        SystemCalendarAccountDto(
+          id: 'windows_ics',
+          accountName: 'Windows 本地日历',
+          accountType: 'local_ics',
+          displayName: '知程导出日历 (ICS)',
+          isPrimary: true,
+        )
+      ];
+    }
+    return [];
   }
 
   /// 开启或关闭 Android 全局灵动悬浮窗

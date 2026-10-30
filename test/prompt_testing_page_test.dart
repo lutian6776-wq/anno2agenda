@@ -99,11 +99,11 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verify Advanced Settings card exists
-    expect(find.text('高级设置'), findsOneWidget);
-    expect(find.text('系统提示词修改与测试'), findsOneWidget);
+    expect(find.text('高级设置'), findsWidgets);
+    expect(find.text('系统提示词模板'), findsOneWidget);
 
     // Tap entry and navigate to PromptTestingPage
-    await tester.tap(find.text('系统提示词修改与测试'));
+    await tester.tap(find.text('系统提示词模板'));
     await tester.pumpAndSettle();
 
     // Verify PromptTestingPage elements

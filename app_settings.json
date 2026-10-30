@@ -1,0 +1,16 @@
+{
+  "engineMode": "hybridAuto",
+  "idleUnloadMinutes": 5,
+  "enableThinkMode": true,
+  "autoPreloadOnOverlayExpand": true,
+  "enableGbnfConstraint": true,
+  "preferredModel": null,
+  "llmEndpoint": "http://127.0.0.1:11434/api/generate",
+  "peerIp": "",
+  "syncDeleteFromSystemCalendar": true,
+  "contextSize": 4096,
+  "maxThinkingTokens": 1024,
+  "temperature": 0.1,
+  "topP": 0.85,
+  "repeatPenalty": 1.05
+}

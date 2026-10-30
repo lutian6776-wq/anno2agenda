@@ -5,11 +5,13 @@ import '../models/agenda_event.dart';
 import '../repositories/agenda_repository.dart';
 import '../services/agenda_write_service.dart';
 import '../services/ai_extractor_service.dart';
+import '../services/app_settings_service.dart';
 import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/platform_bridge.dart';
-import '../services/theme_manager.dart';
+import '../services/theme_manager.dart' hide AppTheme;
+import '../theme/app_theme.dart';
 import '../widgets/engine_status_badge.dart';
 import '../widgets/floating_status_badge.dart';
 import '../widgets/model_center_dialog.dart';
@@ -34,7 +36,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   );
 
   AIEngineMode _engineMode = AIEngineMode.hybridAuto;
-  bool _isExtracting = false;
+  bool get _isExtracting => _terminalModel.isExtracting;
 
   /// 解析引擎状态指示器（红 / 黄 / 绿）
   EngineIndicatorState _engineIndicator = EngineIndicatorState.stopped;
@@ -48,7 +50,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   String? _selectedModelName;
   Set<String> _downloadedSpecIds = {};
   Map<String, double> _partialCacheMB = {};
-  ModelDownloadProgress? _activeDownload;
 
   /// 待确认的 AI 提取草稿列表
   final List<AgendaEvent> _draftEvents = [];
@@ -56,19 +57,28 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   /// 底部 Dock 栏切换（0: AI 提取, 1: 我的日程, 2: 设置）
   int _tabIndex = 0;
 
-  /// 推理过程可视化实况终端状态
-  final List<String> _processLogs = [];
-  final StringBuffer _streamedTokenBuffer = StringBuffer();
-  int _tokenCount = 0;
-  Stopwatch? _extractStopwatch;
-  Timer? _stopwatchTicker;
-  double _elapsedSeconds = 0.0;
+  /// 推理过程可视化实况终端模型模组
+  final InferenceTerminalModel _terminalModel = InferenceTerminalModel();
 
   @override
   void initState() {
     super.initState();
+    final settings = AppSettingsService.instance;
+    _engineMode = settings.engineMode;
+    _selectedModelName = settings.preferredModel;
+    _llmEndpointController.text = settings.llmEndpoint;
+    _peerIpController.text = settings.peerIp;
+
+    _llmEndpointController.addListener(() {
+      AppSettingsService.instance.setLlmEndpoint(_llmEndpointController.text);
+    });
+    _peerIpController.addListener(() {
+      AppSettingsService.instance.setPeerIp(_peerIpController.text);
+    });
+
     AIExtractorService.currentEngineMode = _engineMode;
     AIExtractorService.currentPreferredModel = _selectedModelName;
+    AIExtractorService.currentLlmEndpoint = _llmEndpointController.text;
     _inputController.text =
         AIExtractPage.sampleAnnouncements.first['text']!;
 
@@ -78,12 +88,19 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       _showSnack(msg);
     };
 
+    _terminalModel.addListener(_onTerminalUpdated);
+
     _initServices();
+  }
+
+  void _onTerminalUpdated() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    _stopwatchTicker?.cancel();
+    _terminalModel.removeListener(_onTerminalUpdated);
+    _terminalModel.dispose();
     _inputController.dispose();
     _peerIpController.dispose();
     _llmEndpointController.dispose();
@@ -91,6 +108,18 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   }
 
   Future<void> _initServices() async {
+    final storageDir = await PlatformBridge.getAppStorageDir();
+    if (storageDir != null && storageDir.isNotEmpty) {
+      await AppSettingsService.instance.init(storageDir);
+      if (mounted) {
+        setState(() {
+          _engineMode = AppSettingsService.instance.engineMode;
+          _selectedModelName = AppSettingsService.instance.preferredModel;
+          _llmEndpointController.text = AppSettingsService.instance.llmEndpoint;
+          _peerIpController.text = AppSettingsService.instance.peerIp;
+        });
+      }
+    }
     await AgendaRepository.instance.init();
     await AIExtractorService.initPromptStorage();
 
@@ -276,27 +305,12 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       return;
     }
 
-    _extractStopwatch = Stopwatch()..start();
-    _stopwatchTicker?.cancel();
-    _stopwatchTicker = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted && _isExtracting) {
-        setState(() {
-          _elapsedSeconds =
-              (_extractStopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
-        });
-      }
-    });
+    _terminalModel.start();
 
     final willUseLlm = _engineMode != AIEngineMode.builtInRuleEngine;
     final isAlreadyLoaded = await LocalModelManager.isModelLoadedInRam();
 
     setState(() {
-      _isExtracting = true;
-      _processLogs.clear();
-      _streamedTokenBuffer.clear();
-      _tokenCount = 0;
-      _elapsedSeconds = 0.0;
-
       // 立即联动同步右上角药丸指示标与右侧状态描述
       if (willUseLlm) {
         if (isAlreadyLoaded) {
@@ -331,30 +345,21 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         llmEndpoint: endpoint,
         llmModelName: _selectedModelName,
         thinkMode: LocalModelManager.enableThinkMode,
+        terminalModel: _terminalModel,
         onProgress: ({stepLog, token, tokenCount}) {
-          if (!mounted) return;
-          setState(() {
-            if (stepLog != null) {
-              final now = DateTime.now();
-              final timeStr =
-                  '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}.${(now.millisecond ~/ 100)}';
-              _processLogs.add('[$timeStr] $stepLog');
-            }
-            if (token != null) {
-              _streamedTokenBuffer.write(token);
-              if (tokenCount != null) {
-                _tokenCount = tokenCount;
-              }
-              // 当第一个 Token 出来时，说明大模型已完成加载并在极速流式输出，立即同步指示标为就绪活跃
-              if (_engineIndicator != EngineIndicatorState.ready) {
+          if (token != null && _engineIndicator != EngineIndicatorState.ready) {
+            if (mounted) {
+              setState(() {
                 _engineIndicator = EngineIndicatorState.ready;
                 _engineIndicatorDetail =
                     '大模型推理中 (${_selectedModelName ?? "本地大模型"})';
-              }
+              });
             }
-          });
+          }
         },
       );
+
+      _terminalModel.finish();
 
       if (!mounted) return;
       setState(() {
@@ -365,17 +370,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       await _refreshLocalModelState(preserveLastEngineInfo: true);
       _showSnack('✨ 成功提取出 ${result.events.length} 个日程节点！');
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _processLogs.add('[错误] 解析异常: $e');
-        });
-      }
+      _terminalModel.recordError('解析异常: $e');
       _showSnack('解析出错: $e');
       await _refreshLocalModelState();
-    } finally {
-      _stopwatchTicker?.cancel();
-      _extractStopwatch?.stop();
-      if (mounted) setState(() => _isExtracting = false);
     }
   }
 
@@ -391,28 +388,13 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       });
     }
 
-    _extractStopwatch = Stopwatch()..start();
-    _stopwatchTicker?.cancel();
-    _stopwatchTicker = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted && _isExtracting) {
-        setState(() {
-          _elapsedSeconds =
-              (_extractStopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
-        });
-      }
-    });
+    _terminalModel.start();
 
     final willUseLlm = _engineMode != AIEngineMode.builtInRuleEngine;
     final isAlreadyLoaded = await LocalModelManager.isModelLoadedInRam();
 
     if (mounted) {
       setState(() {
-        _isExtracting = true;
-        _processLogs.clear();
-        _streamedTokenBuffer.clear();
-        _tokenCount = 0;
-        _elapsedSeconds = 0.0;
-
         if (willUseLlm) {
           if (isAlreadyLoaded) {
             _engineIndicator = EngineIndicatorState.ready;
@@ -448,6 +430,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         llmEndpoint: endpoint,
         llmModelName: _selectedModelName,
         thinkMode: LocalModelManager.enableThinkMode,
+        terminalModel: _terminalModel,
         onProgress: ({stepLog, token, tokenCount}) {
           if (tokenCount != null && tokenCount % 6 == 1) {
             PlatformBridge.sendOverlayProgress(
@@ -457,28 +440,19 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
             PlatformBridge.sendOverlayProgress('⏳ $stepLog');
           }
 
-          if (!mounted) return;
-          setState(() {
-            if (stepLog != null) {
-              final now = DateTime.now();
-              final timeStr =
-                  '${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}.${(now.millisecond ~/ 100)}';
-              _processLogs.add('[$timeStr] $stepLog');
-            }
-            if (token != null) {
-              _streamedTokenBuffer.write(token);
-              if (tokenCount != null) {
-                _tokenCount = tokenCount;
-              }
-              if (_engineIndicator != EngineIndicatorState.ready) {
+          if (token != null && _engineIndicator != EngineIndicatorState.ready) {
+            if (mounted) {
+              setState(() {
                 _engineIndicator = EngineIndicatorState.ready;
                 _engineIndicatorDetail =
                     '大模型推理中 (${_selectedModelName ?? "本地大模型"})';
-              }
+              });
             }
-          });
+          }
         },
       );
+
+      _terminalModel.finish();
 
       if (mounted) {
         setState(() {
@@ -490,10 +464,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       }
       await _refreshLocalModelState(preserveLastEngineInfo: true);
       return result;
-    } finally {
-      _stopwatchTicker?.cancel();
-      _extractStopwatch?.stop();
-      if (mounted) setState(() => _isExtracting = false);
+    } catch (e) {
+      _terminalModel.recordError('悬浮窗解析异常: $e');
+      rethrow;
     }
   }
 
@@ -505,7 +478,14 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       );
       if (res.persisted) {
         setState(() {
-          _draftEvents.removeWhere((e) => e.id == event.id);
+          final idx = _draftEvents.indexWhere(
+            (e) => identical(e, event) || (e.id.isNotEmpty && e.id == event.id),
+          );
+          if (idx >= 0) {
+            _draftEvents.removeAt(idx);
+          } else {
+            _draftEvents.remove(event);
+          }
         });
       }
       if (res.success) {
@@ -541,7 +521,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       selectedModelName: _selectedModelName,
       downloadedSpecIds: _downloadedSpecIds,
       partialCacheMB: _partialCacheMB,
-      activeDownload: _activeDownload,
+      activeDownloads: LocalModelManager.activeDownloads,
       onRefreshState: _refreshLocalModelState,
       onSelectModel: (model) {
         AIExtractorService.currentPreferredModel = model;
@@ -577,6 +557,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           final isCompact = width < 760;
 
           return Scaffold(
+          backgroundColor: context.appColors.bgBase,
           appBar: AppBar(
             titleSpacing: 12,
             title: Row(
@@ -584,15 +565,19 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
               children: [
                 Icon(
                   Icons.auto_awesome,
-                  color: Theme.of(context).colorScheme.primary,
+                  color: context.colorScheme.primary,
                   size: 22,
                 ),
                 const SizedBox(width: 6),
-                const Flexible(
+                Flexible(
                   child: Text(
                     '知程 Anno2Agenda',
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 17,
+                      color: context.appColors.textPrimary,
+                    ),
                   ),
                 ),
               ],
@@ -668,7 +653,11 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
                         ),
                       ],
                     ),
-                    const VerticalDivider(thickness: 1, width: 1),
+                    VerticalDivider(
+                      thickness: 1,
+                      width: 1,
+                      color: context.appColors.borderSubtle,
+                    ),
                     Expanded(child: _buildCurrentPage()),
                   ],
                 ),
@@ -724,16 +713,21 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           llmEndpoint: _llmEndpointController.text,
           lastEngineInfo: _lastEngineInfo,
           draftEvents: _draftEvents,
-          isExtracting: _isExtracting,
-          processLogs: _processLogs,
-          streamedTokens: _streamedTokenBuffer.toString(),
-          tokenCount: _tokenCount,
-          elapsedSeconds: _elapsedSeconds,
+          terminalModel: _terminalModel,
           onRunExtraction: _runExtraction,
           onConfirmDraft: _confirmDraftEvent,
           onConfirmAllDrafts: _confirmAllDrafts,
           onRemoveDraft: (ev) {
-            setState(() => _draftEvents.removeWhere((e) => e.id == ev.id));
+            setState(() {
+              final idx = _draftEvents.indexWhere(
+                (e) => identical(e, ev) || (e.id.isNotEmpty && e.id == ev.id),
+              );
+              if (idx >= 0) {
+                _draftEvents.removeAt(idx);
+              } else {
+                _draftEvents.remove(ev);
+              }
+            });
           },
           onUpdateDraft: (ev) {
             setState(() {
@@ -756,7 +750,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         return SettingsPage(
           engineMode: _engineMode,
           onEngineModeChanged: (mode) {
-            AIExtractorService.currentEngineMode = mode;
+            AppSettingsService.instance.setEngineMode(mode);
             setState(() => _engineMode = mode);
             _refreshLocalModelState();
           },
