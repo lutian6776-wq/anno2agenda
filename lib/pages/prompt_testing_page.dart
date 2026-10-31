@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../services/ai_extractor_service.dart';
 import '../services/local_model_manager.dart';
 import '../theme/app_theme.dart';
 import '../widgets/agenda_event_card.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/inference_terminal.dart';
 import 'ai_extract_page.dart';
 
@@ -22,6 +24,88 @@ class PromptTestingPage extends StatefulWidget {
 class _PromptTestingPageState extends State<PromptTestingPage> {
   final TextEditingController _promptController = TextEditingController();
   final TextEditingController _testTextController = TextEditingController();
+  final TextEditingController _externalJsonController = TextEditingController();
+
+  static const List<Map<String, String>> _sampleExternalJsons = [
+    {
+      'label': '标准合规 JSON (含完整字段与 ISO 时间)',
+      'json': '''{
+  "events": [
+    {
+      "title": "项目架构研讨会",
+      "startTime": "2026-11-05T14:30:00",
+      "endTime": "2026-11-05T16:00:00",
+      "location": "研发楼B座302",
+      "description": "探讨端侧离线推理与 GBNF 语法约束调优",
+      "checklist": ["准备演示 PPT", "带测试设备"],
+      "reminderMinutes": 15,
+      "confidence": 0.98
+    }
+  ]
+}''',
+    },
+    {
+      'label': 'Markdown 代码块包裹 (常见于未开启 GBNF 的模型输出)',
+      'json': '''好的，这是为您提取的日程 JSON：
+```json
+{
+  "events": [
+    {
+      "title": "学术前沿讲座",
+      "startTime": "2026-11-06T09:00:00",
+      "endTime": "2026-11-06T11:30:00",
+      "location": "大礼堂报告厅",
+      "description": "主讲人：张教授"
+    }
+  ]
+}
+```
+请您核对日程安排。''',
+    },
+    {
+      'label': '含 <think> 思维链 (DeepSeek-R1 / Qwen 思考模式输出)',
+      'json': '''<think>
+用户发来的是一个讲座通知。
+时间在 2026 年 11 月 8 日下午三点，转换为 ISO-8601: 2026-11-08T15:00:00。
+地点在图书馆一楼，提醒时间预设为 15 分钟。
+</think>
+{
+  "events": [
+    {
+      "title": "读书分享会",
+      "startTime": "2026-11-08T15:00:00",
+      "endTime": "2026-11-08T17:00:00",
+      "location": "图书馆一楼咖啡吧",
+      "description": "分享本月阅读书单"
+    }
+  ]
+}''',
+    },
+    {
+      'label': '非标准顶层数组 (直接输出 [...] 数组)',
+      'json': '''[
+  {
+    "title": "部门周会",
+    "startTime": "2026-11-09T10:00:00",
+    "endTime": "2026-11-09T11:00:00",
+    "location": "线上会议室"
+  }
+]''',
+    },
+    {
+      'label': '时间格式缺陷 (非 ISO-8601 时间格式)',
+      'json': '''{
+  "events": [
+    {
+      "title": "调课通知",
+      "startTime": "本周五下午两点半",
+      "endTime": "本周五下午四点",
+      "location": "一教201"
+    }
+  ]
+}''',
+    },
+  ];
 
   // 独立滚动控制器，确保桌面端 Scrollbar 正确绑定且各栏平滑滚动
   final ScrollController _leftScrollController = ScrollController();
@@ -63,6 +147,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
       if (!_isDirty) setState(() => _isDirty = true);
     });
 
+    _externalJsonController.addListener(() {
+      if (mounted) setState(() {});
+    });
+
     _terminalModel.addListener(_onTerminalUpdated);
 
     _loadModels();
@@ -78,6 +166,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     _terminalModel.dispose();
     _promptController.dispose();
     _testTextController.dispose();
+    _externalJsonController.dispose();
     _leftScrollController.dispose();
     _midScrollController.dispose();
     _rightScrollController.dispose();
@@ -90,7 +179,9 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     if (!mounted) return;
     setState(() {
       _availableModels = list;
-      if (list.isNotEmpty) {
+      if (list.isNotEmpty &&
+          (_selectedModel == null ||
+              !list.any((m) => LocalModelManager.isSameModel(m, _selectedModel)))) {
         _selectedModel = list.first;
       }
     });
@@ -121,12 +212,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
     }
     setState(() => _isDirty = false);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('✅ 系统提示词已保存，将全局应用于常规提取与悬浮窗！'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    AppToast.show(context, '✅ 系统提示词已保存，将全局应用于常规提取与悬浮窗！');
   }
 
   Future<void> _resetToDefault() async {
@@ -175,12 +261,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
         _isDirty = false;
       });
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('已恢复为官方内置默认系统提示词'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.show(context, '已恢复为官方内置默认系统提示词');
     }
   }
 
@@ -235,9 +316,69 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
 
   void _showSnack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    AppToast.show(context, msg);
+  }
+
+  void _parseExternalJson() {
+    final rawJson = _externalJsonController.text.trim();
+    if (rawJson.isEmpty) {
+      _showSnack('请先输入或粘贴待测试的外来 JSON 文本');
+      return;
+    }
+
+    final rawText = _testTextController.text.trim().isNotEmpty
+        ? _testTextController.text.trim()
+        : '外来 JSON 直接测试';
+    final deviceOrigin = Platform.isAndroid ? 'android' : 'windows';
+
+    _terminalModel.clear();
+    _terminalModel.start();
+    _terminalModel.addLog('[测试] 开始直接解析外来 JSON (免调用模型)...');
+    _terminalModel.addLog('[输入] 字符数: ${rawJson.length} 字符');
+
+    final diag = AIExtractorService.parseAndDiagnoseJson(
+      rawJson: rawJson,
+      rawText: rawText,
+      sourceType: 'external_json_test',
+      deviceOrigin: deviceOrigin,
     );
+
+    if (diag.parseError != null) {
+      _terminalModel.addLog('[格式诊断] ⚠️ ${diag.parseError}');
+    } else {
+      _terminalModel.addLog('[格式诊断] ✅ 格式完全符合标准规范');
+    }
+    _terminalModel.addLog('[结果] 提取出 ${diag.events.length} 项日程草稿');
+    _terminalModel.finish();
+
+    setState(() {
+      _hasTested = true;
+      _rawOutput = rawJson;
+      _diagnosticError = diag.parseError;
+      _parsedEvents = diag.events;
+    });
+
+    _showSnack(
+      diag.parseError != null
+          ? '解析完成 (提取 ${diag.events.length} 项)，存在格式诊断提示'
+          : '✅ 成功解析提取 ${diag.events.length} 项日程',
+    );
+  }
+
+  void _formatExternalJson() {
+    final text = _externalJsonController.text.trim();
+    if (text.isEmpty) {
+      _showSnack('输入框为空，无法格式化');
+      return;
+    }
+    try {
+      final decoded = jsonDecode(text);
+      final pretty = const JsonEncoder.withIndent('  ').convert(decoded);
+      _externalJsonController.text = pretty;
+      _showSnack('✅ 已美化格式化 JSON');
+    } catch (e) {
+      _showSnack('当前文本非标准纯 JSON（可能包含 Markdown 代码块或附带文字）: $e');
+    }
   }
 
   Future<void> _showGbnfInspectorDialog() async {
@@ -494,6 +635,11 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                                 ),
                                 const SizedBox(height: 14),
                                 _buildRunControlsCard(primaryColor),
+                                const SizedBox(height: 14),
+                                _buildExternalJsonCard(
+                                  primaryColor,
+                                  isThreeCol: true,
+                                ),
                               ],
                             ),
                           ),
@@ -549,6 +695,8 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                             _buildUserPromptCard(primaryColor),
                             const SizedBox(height: 14),
                             _buildRunControlsCard(primaryColor),
+                            const SizedBox(height: 14),
+                            _buildExternalJsonCard(primaryColor),
                           ],
                         ),
                       ),
@@ -595,6 +743,8 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                       _buildUserPromptCard(primaryColor),
                       const SizedBox(height: 12),
                       _buildRunControlsCard(primaryColor),
+                      const SizedBox(height: 12),
+                      _buildExternalJsonCard(primaryColor),
                       const SizedBox(height: 16),
                       Divider(color: appColors.borderSubtle),
                       const SizedBox(height: 12),
@@ -899,10 +1049,12 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                       style: TextStyle(color: appColors.textTertiary),
                     ),
                     items: _availableModels.map((m) {
+                      final displayName =
+                          LocalModelManager.getModelDisplayName(m);
                       return DropdownMenuItem(
                         value: m,
                         child: Text(
-                          m,
+                          displayName == m ? m : '$displayName ($m)',
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 12.5,
@@ -912,7 +1064,10 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
                       );
                     }).toList(),
                     onChanged: (val) {
-                      if (val != null) setState(() => _selectedModel = val);
+                      if (val != null) {
+                        setState(() => _selectedModel = val);
+                        LocalModelManager.preloadModel(preferredModelId: val);
+                      }
                     },
                   ),
                 ),
@@ -1043,6 +1198,185 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 构建直接解析外来 JSON 的测试卡片
+  Widget _buildExternalJsonCard(
+    Color primaryColor, {
+    bool isThreeCol = false,
+  }) {
+    final appColors = context.appColors;
+    return Card(
+      color: appColors.surfaceCard,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: appColors.borderSubtle,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.integration_instructions_outlined,
+                        color: primaryColor, size: 18),
+                    const SizedBox(width: 6),
+                    Text(
+                      '直接解析外来 JSON',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: appColors.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    PopupMenuButton<int>(
+                      tooltip: '填入典型外部 JSON 测试样例',
+                      color: appColors.surfaceModal,
+                      icon: const Icon(Icons.playlist_add_check, size: 18),
+                      onSelected: (idx) {
+                        _externalJsonController.text =
+                            _sampleExternalJsons[idx]['json']!;
+                      },
+                      itemBuilder: (context) => [
+                        for (int i = 0;
+                            i < _sampleExternalJsons.length;
+                            i++)
+                          PopupMenuItem(
+                            value: i,
+                            child: Text(
+                              _sampleExternalJsons[i]['label']!,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: appColors.textPrimary,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: '从剪贴板粘贴',
+                      icon: const Icon(Icons.paste, size: 18),
+                      onPressed: () async {
+                        final data =
+                            await Clipboard.getData(Clipboard.kTextPlain);
+                        if (data?.text != null && data!.text!.isNotEmpty) {
+                          _externalJsonController.text = data.text!;
+                        }
+                      },
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: '清空内容',
+                      icon: const Icon(Icons.clear_all, size: 18),
+                      onPressed: () {
+                        _externalJsonController.clear();
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '说明：可直接粘贴外部大模型（如 ChatGPT / Claude / DeepSeek）生成的原始响应、带 Markdown 代码块或 <think> 思维链的内容，即刻验证解析器容错度与 GBNF 规范兼容性。',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: appColors.textSecondary,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _externalJsonController,
+              maxLines: isThreeCol ? 8 : 6,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                height: 1.45,
+                color: appColors.textPrimary,
+              ),
+              decoration: InputDecoration(
+                hintText:
+                    '在此粘贴或输入外来 JSON (例如 {"events": [{"title": "会议", ...}]})...',
+                hintStyle: TextStyle(
+                  color: appColors.textTertiary,
+                  fontFamily: 'monospace',
+                  fontSize: 11.5,
+                ),
+                filled: true,
+                fillColor: appColors.surfaceLow,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: appColors.borderSubtle,
+                  ),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(
+                    color: appColors.borderSubtle,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _formatExternalJson,
+                  icon: const Icon(Icons.auto_fix_high, size: 14),
+                  label: const Text('格式化 JSON',
+                      style: TextStyle(fontSize: 11.5)),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${_externalJsonController.text.length} 字符',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: appColors.textTertiary,
+                  ),
+                ),
+                const Spacer(),
+                FilledButton.tonalIcon(
+                  onPressed: _parseExternalJson,
+                  icon: const Icon(Icons.play_arrow_rounded, size: 16),
+                  label: const Text('立即解析外来 JSON',
+                      style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.bold)),
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1225,7 +1559,7 @@ class _PromptTestingPageState extends State<PromptTestingPage> {
           for (final event in _parsedEvents)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: AgendaEventCard(
+              child: CompactAgendaCard(
                 event: event,
                 showDate: true,
                 isDraft: true,

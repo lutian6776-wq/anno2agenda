@@ -125,4 +125,37 @@ void main() {
 
     await tester.binding.setSurfaceSize(null);
   });
+
+  testWidgets(
+      'MyAgendaPage desktop renders floating "今天" rounded button at bottom-right of left panel',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1024, 768));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: MyAgendaPage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Verify top header has NO "今天" OutlinedButton
+    expect(find.widgetWithText(OutlinedButton, '今天'), findsNothing);
+
+    // Verify day summary card has NO "回今天" TextButton
+    expect(find.widgetWithText(TextButton, '回今天'), findsNothing);
+
+    // Verify left column floating rounded-rectangle button "今天" is present
+    final floatingTodayBtn = find.descendant(
+      of: find.byTooltip('回到今天'),
+      matching: find.text('今天'),
+    );
+    expect(floatingTodayBtn, findsOneWidget);
+
+    // Tap floating "今天" button
+    await tester.tap(floatingTodayBtn);
+    await tester.pumpAndSettle();
+
+    await tester.binding.setSurfaceSize(null);
+  });
 }

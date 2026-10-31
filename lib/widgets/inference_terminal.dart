@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/inference_terminal_model.dart';
 import '../theme/app_theme.dart';
+import 'app_toast.dart';
 
 /// 现代 AI 应用风格的端侧推理监控模组
 ///
@@ -52,6 +53,8 @@ class _InferenceTerminalState extends State<InferenceTerminal>
   final ScrollController _scrollController = ScrollController();
   bool _manualExpanded = false;
   bool _lastExtracting = false;
+  Stopwatch? _localGenerationStopwatch;
+  bool _hasReceivedFirstTokenLocal = false;
 
   bool get _effectiveExtracting =>
       widget.model?.isExtracting ?? widget.isExtracting ?? false;
@@ -80,6 +83,34 @@ class _InferenceTerminalState extends State<InferenceTerminal>
     }
   }
 
+  /// 获取格式化后的 Token 生成速率（t/s）
+  /// 严格从模型吐出首个字（First Token）开始统计，剔除模型加载、冷启动与 Prompt 编码等待时间
+  String get _formattedTokenSpeed {
+    if (widget.model != null) {
+      return widget.model!.tokenSpeedFormatted;
+    }
+
+    // 针对未传入 model 的独立降级模式进行本地首字生成耗时测算
+    if (!_hasReceivedFirstTokenLocal &&
+        _effectiveExtracting &&
+        (_effectiveTokenCount > 0 || _effectiveStreamedTokens.isNotEmpty)) {
+      _hasReceivedFirstTokenLocal = true;
+      _localGenerationStopwatch = Stopwatch()..start();
+    }
+
+    final count = _effectiveTokenCount;
+    if (!_hasReceivedFirstTokenLocal || count <= 0 || _localGenerationStopwatch == null) {
+      return '0.0';
+    }
+
+    final genSec = _localGenerationStopwatch!.elapsedMilliseconds / 1000.0;
+    if (genSec < 0.05 && count <= 2) {
+      return '0.0';
+    }
+    if (genSec <= 0) return '0.0';
+    return (count / genSec).toStringAsFixed(1);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -90,9 +121,14 @@ class _InferenceTerminalState extends State<InferenceTerminal>
 
   void _checkExtractingTransition() {
     final currentExtracting = _effectiveExtracting;
-    if (_lastExtracting && !currentExtracting) {
-      // 模型完成思考与结构化解析后，思考框平滑收起高度为 0
+    if (!_lastExtracting && currentExtracting) {
+      // 启动新推理会话：重置本地首字生成计时器
+      _hasReceivedFirstTokenLocal = false;
+      _localGenerationStopwatch = null;
+    } else if (_lastExtracting && !currentExtracting) {
+      // 模型完成思考与结构化解析后，思考框平滑收起高度为 0，停止本地生成秒表
       _manualExpanded = false;
+      _localGenerationStopwatch?.stop();
     }
     _lastExtracting = currentExtracting;
   }
@@ -151,9 +187,7 @@ class _InferenceTerminalState extends State<InferenceTerminal>
     final leafGreen = appColors.tagWork; // 统一应用叶绿色 (#35B890)
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    final tokenSpeed = elapsedSec > 0
-        ? (tokenCount / elapsedSec).toStringAsFixed(1)
-        : '0.0';
+    final tokenSpeed = _formattedTokenSpeed;
 
     // 思考流卡片可见性：推理中只要有内容即展开；完成之后取决于用户手动展开
     final isThinkingBoxOpen =
@@ -366,13 +400,7 @@ class _InferenceTerminalState extends State<InferenceTerminal>
                       child: InkWell(
                         onTap: () {
                           Clipboard.setData(ClipboardData(text: content));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('已复制思考与输出内容'),
-                              behavior: SnackBarBehavior.floating,
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
+                          AppToast.show(context, '已复制思考与输出内容');
                         },
                         borderRadius: BorderRadius.circular(4),
                         child: Padding(

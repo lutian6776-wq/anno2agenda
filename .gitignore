@@ -29,9 +29,55 @@ build.log
 # 避免团队协作时不同机器的个人日程数据与配置相互覆盖冲突
 # =====================================================================
 agenda_events.json
+app_settings.json
 theme_mode.txt
 exported_ics/
 scratch/
+
+# =====================================================================
+# 3.5. 敏感密钥、私钥证书与凭据配置 (Secrets, Private Keys & Credentials)
+# 严禁将任何公私钥、证书、API Token 或含敏感信息的配置文件提交至版本库
+# =====================================================================
+# SSH 密钥与公钥 (含本地临时生成的 key 文件)
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.pub
+/2
+/2.pub
+known_hosts*
+authorized_keys*
+
+# SSL/TLS 证书、私钥与签名文件
+*.pem
+*.key
+*.pk8
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.csr
+
+# 环境变量与机密凭据文件
+.env
+.env.*
+!.env.example
+!.env.template
+secrets/
+secrets.json
+secret.json
+credentials.json
+client_secret*.json
+token.json
+service-account*.json
+
+# 移动端服务与云配置凭据
+google-services.json
+GoogleService-Info.plist
+signing.properties
+keystore.properties
 
 # =====================================================================
 # 4. Flutter / Dart 构件与依赖缓存 (Flutter / Dart / Pub)

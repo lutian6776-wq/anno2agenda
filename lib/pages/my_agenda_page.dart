@@ -12,6 +12,8 @@ import '../theme/app_theme.dart';
 import '../widgets/agenda_empty_state.dart';
 import '../widgets/agenda_event_card.dart';
 import '../widgets/agenda_filter_bar.dart';
+import '../widgets/app_toast.dart';
+import '../widgets/calendar_sync_dialog.dart';
 
 /// 时间跨度视图模式
 enum AgendaViewSpan {
@@ -60,6 +62,28 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
   bool _isHoveringSplitter = false;
   bool _isDraggingSplitter = false;
 
+  // 响应式桌面端让位抽屉与移动端底部弹窗状态 (DRAWER_DESIGN_SPEC.md)
+  bool _isWide = false;
+  String? _activeDrawerId;
+  String _drawerTitle = '';
+  String _drawerSubtitle = '';
+  IconData _drawerIcon = Icons.event_note_outlined;
+  Widget Function(
+    BuildContext context,
+    StateSetter setDrawerState,
+    VoidCallback onClose,
+  )? _drawerFormBuilder;
+  final Map<String, GlobalKey> _tileKeys = {};
+
+  bool get _isCalendarSyncDrawerOpen => _activeDrawerId == 'calendar_sync';
+  set _isCalendarSyncDrawerOpen(bool open) {
+    if (open) {
+      _activeDrawerId = 'calendar_sync';
+    } else if (_activeDrawerId == 'calendar_sync') {
+      _activeDrawerId = null;
+    }
+  }
+
   // 跨度选择按钮锚点 Key（供桌面端在点击处展开浮动 Popup 窗）
   final GlobalKey _spanButtonKey = GlobalKey();
 
@@ -80,13 +104,7 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
 
   void _showSnack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(milliseconds: 2400),
-      ),
-    );
+    AppToast.show(context, msg);
   }
 
   // ================= 业务动作方法 =================
@@ -234,473 +252,27 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
     }
   }
 
-  /// 弹出系统日历双向同步管理弹窗
-  Future<void> _showCalendarSyncModal() async {
-    var span = CalendarTimeSpanOption.threeMonths;
-    CalendarSyncResult? localSyncResult =
-        CalendarSyncService.instance.lastResult;
-    bool isSyncing = false;
-
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: context.colorScheme.surface.withValues(alpha: 0),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) {
-          final appColors = context.appColors;
-          final primaryColor = context.colorScheme.primary;
-          final allEvents = _repo.allEvents;
-          final syncedCount =
-              allEvents.where((e) => e.syncedToSystemCalendar).length;
-          final unsyncedCount = allEvents.length - syncedCount;
-
-          return Center(
-            child: Container(
-              constraints: const BoxConstraints(maxWidth: 580),
-              margin: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom,
-              ),
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-              decoration: BoxDecoration(
-                color: appColors.surfaceModal,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(20)),
-                border: Border.all(
-                  color: appColors.borderSubtle,
-                ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 顶部小把手
-                  Center(
-                    child: Container(
-                      width: 38,
-                      height: 4,
-                      margin: const EdgeInsets.only(bottom: 14),
-                      decoration: BoxDecoration(
-                        color: appColors.borderSubtle,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-
-                  // 标题栏
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: appColors.tagWorkContainer,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Icon(
-                          Icons.sync,
-                          size: 22,
-                          color: appColors.tagWork,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '系统日历双向同步中心',
-                              style: TextStyle(
-                                fontSize: 16.5,
-                                fontWeight: FontWeight.bold,
-                                color: appColors.textPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              Platform.isAndroid
-                                  ? '原生直连 Android CalendarProvider，支持导入/推送/联动删除'
-                                  : '支持与 Windows 本地日历 (.ics) 双向读写与同步清理',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: appColors.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 20),
-                        color: appColors.textSecondary,
-                        onPressed: () => Navigator.pop(ctx),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // 统计卡片
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: appColors.surfaceLow,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: appColors.borderSubtle,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildSyncStatItem(
-                          label: '本地日程',
-                          value: '${allEvents.length}',
-                          color: appColors.tagRest,
-                        ),
-                        _buildSyncStatItem(
-                          label: '已同步系统',
-                          value: '$syncedCount',
-                          color: appColors.tagWork,
-                        ),
-                        _buildSyncStatItem(
-                          label: '未同步待推',
-                          value: '$unsyncedCount',
-                          color: unsyncedCount > 0
-                              ? appColors.tagStudy
-                              : appColors.textTertiary,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-
-                  // 时间跨度筛选行
-                  Row(
-                    children: [
-                      Text(
-                        '同步跨度：',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: appColors.textPrimary,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: CalendarTimeSpanOption.values.map((opt) {
-                            final isSelected = span == opt;
-                            return ChoiceChip(
-                              label: Text(
-                                opt.label,
-                                style: TextStyle(
-                                  fontSize: 11.5,
-                                  color: isSelected
-                                      ? context.colorScheme.onPrimary
-                                      : appColors.textSecondary,
-                                ),
-                              ),
-                              selected: isSelected,
-                              selectedColor: primaryColor,
-                              backgroundColor: appColors.surfaceLow,
-                              side: BorderSide(
-                                color: isSelected
-                                    ? primaryColor
-                                    : appColors.borderSubtle,
-                              ),
-                              onSelected: isSyncing
-                                  ? null
-                                  : (sel) {
-                                      if (sel) {
-                                        setModalState(() => span = opt);
-                                      }
-                                    },
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-
-                  // 联动删除开关提示
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: appColors.surfaceLow,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.auto_delete_outlined,
-                          size: 16,
-                          color: primaryColor,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            '在知程删除已同步日程时，默认联动删除系统日历对应事件',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: appColors.textPrimary,
-                            ),
-                          ),
-                        ),
-                        Switch(
-                          value: AppSettingsService
-                              .instance.syncDeleteFromSystemCalendar,
-                          activeTrackColor: primaryColor,
-                          onChanged: (v) async {
-                            await AppSettingsService.instance
-                                .setSyncDeleteFromSystemCalendar(v);
-                            setModalState(() {});
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // 核心同步操作按钮组
-                  if (isSyncing)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      child: Center(
-                        child: Column(
-                          children: [
-                            const CircularProgressIndicator(strokeWidth: 2.5),
-                            const SizedBox(height: 10),
-                            Text(
-                              '正在执行系统日历双向智能同步与对齐...',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: primaryColor,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                  else ...[
-                    FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: primaryColor,
-                        foregroundColor: context.colorScheme.onPrimary,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: () async {
-                        setModalState(() => isSyncing = true);
-                        final res = await CalendarSyncService.instance
-                            .performTwoWaySync(
-                          options: CalendarSyncOptions(
-                            direction: CalendarSyncDirection.twoWay,
-                            timeSpan: span,
-                            autoDeleteSystemWhenAppDeleted: AppSettingsService
-                                .instance.syncDeleteFromSystemCalendar,
-                          ),
-                        );
-                        setModalState(() {
-                          isSyncing = false;
-                          localSyncResult = res;
-                        });
-                        _showSnack('🎉 ${res.summary}');
-                      },
-                      icon: const Icon(Icons.sync, size: 18),
-                      label: const Text(
-                        '一键双向智能同步 (推拉对齐)',
-                        style: TextStyle(
-                          fontSize: 14.5,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: appColors.textPrimary,
-                              side: BorderSide(
-                                color: appColors.borderSubtle,
-                              ),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 10),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                            ),
-                            onPressed: () async {
-                              setModalState(() => isSyncing = true);
-                              final res = await CalendarSyncService.instance
-                                  .performTwoWaySync(
-                                options: CalendarSyncOptions(
-                                  direction: CalendarSyncDirection.pullOnly,
-                                  timeSpan: span,
-                                ),
-                              );
-                              setModalState(() {
-                                isSyncing = false;
-                                localSyncResult = res;
-                              });
-                              _showSnack('📥 ${res.summary}');
-                            },
-                            icon: Icon(
-                              Icons.download,
-                              size: 16,
-                              color: appColors.tagWork,
-                            ),
-                            label: const Text(
-                              '从系统日历导入',
-                              style: TextStyle(fontSize: 13),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: appColors.textPrimary,
-                              side: BorderSide(
-                                color: appColors.borderSubtle,
-                              ),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 10),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                            ),
-                            onPressed: () async {
-                              setModalState(() => isSyncing = true);
-                              final res = await CalendarSyncService.instance
-                                  .performTwoWaySync(
-                                options: CalendarSyncOptions(
-                                  direction: CalendarSyncDirection.pushOnly,
-                                  timeSpan: span,
-                                ),
-                              );
-                              setModalState(() {
-                                isSyncing = false;
-                                localSyncResult = res;
-                              });
-                              _showSnack('📤 ${res.summary}');
-                            },
-                            icon: Icon(
-                              Icons.upload,
-                              size: 16,
-                              color: appColors.tagRest,
-                            ),
-                            label: const Text(
-                              '全部推送到系统',
-                              style: TextStyle(fontSize: 13),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-
-                  // 同步结果报告卡片
-                  if (localSyncResult != null) ...[
-                    const SizedBox(height: 14),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: localSyncResult!.success
-                            ? appColors.successContainer
-                            : appColors.errorContainer,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: localSyncResult!.success
-                              ? appColors.tagWork
-                              : context.colorScheme.error,
-                        ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                localSyncResult!.success
-                                    ? Icons.check_circle_outline
-                                    : Icons.error_outline,
-                                size: 16,
-                                color: localSyncResult!.success
-                                    ? appColors.tagWork
-                                    : context.colorScheme.error,
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  localSyncResult!.summary,
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.bold,
-                                    color: localSyncResult!.success
-                                        ? appColors.tagWork
-                                        : context.colorScheme.error,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (localSyncResult!.errorLogs.isNotEmpty) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              localSyncResult!.errorLogs.take(2).join('\n'),
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: context.colorScheme.error,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          );
+  /// 切换或弹出系统日历双向同步中心抽屉
+  Future<void> _toggleCalendarSyncDrawer({required bool isDesktop}) async {
+    if (isDesktop) {
+      setState(() {
+        _isCalendarSyncDrawerOpen = !_isCalendarSyncDrawerOpen;
+      });
+    } else {
+      await CalendarSyncPanel.showBottomSheet(
+        context,
+        onSyncCompleted: () {
+          if (mounted) setState(() {});
         },
-      ),
-    );
+      );
+      if (mounted) setState(() {});
+    }
   }
 
-  Widget _buildSyncStatItem({
-    required String label,
-    required String value,
-    required Color color,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: color,
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            color: context.appColors.textSecondary,
-          ),
-        ),
-      ],
-    );
+  /// 兼容旧入口调起
+  Future<void> _showCalendarSyncModal({bool? isDesktop}) async {
+    final desktop = isDesktop ?? (MediaQuery.of(context).size.width >= 640);
+    await _toggleCalendarSyncDrawer(isDesktop: desktop);
   }
 
   Future<void> _confirmClearAll() async {
@@ -1130,297 +702,736 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
     );
   }
 
-  /// 弹出查看日程详情卡片
-  void _showEventDetailSheet(AgendaEvent event) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: context.appColors.surfaceModal,
-      isScrollControlled: true,
-      constraints: const BoxConstraints(maxWidth: 540),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final appColors = context.appColors;
-          final primaryColor = context.colorScheme.primary;
-          return Padding(
-            padding: EdgeInsets.only(
-              left: 20,
-              right: 20,
-              top: 16,
-              bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 拖动把手
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: appColors.borderSubtle,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // 标题与来源标签
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+  // ================= 自动让位抽屉与日程详情/修改体系（符合 DRAWER_DESIGN_SPEC.md） =================
+
+  void _closeDrawer() {
+    if (_activeDrawerId != null && mounted) {
+      setState(() => _activeDrawerId = null);
+    }
+  }
+
+  /// 抽屉内容与状态统一管理器
+  void _openCustomOptionDrawer({
+    required String drawerId,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    GlobalKey? anchorKey,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setDrawerState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) async {
+    // 再次点击同一行则折叠关闭
+    if (_activeDrawerId == drawerId) {
+      _closeDrawer();
+      return;
+    }
+
+    final isWide = _isWide;
+    if (isWide) {
+      setState(() {
+        _activeDrawerId = drawerId;
+        _drawerTitle = title;
+        _drawerSubtitle = subtitle;
+        _drawerIcon = icon;
+        _drawerFormBuilder = formBuilder;
+      });
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+          alignment: 0.25,
+        );
+      }
+    } else {
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          alignment: 0.12,
+        );
+      }
+      setState(() {
+        _activeDrawerId = drawerId;
+        _drawerTitle = title;
+        _drawerSubtitle = subtitle;
+        _drawerIcon = icon;
+        _drawerFormBuilder = formBuilder;
+      });
+
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted) return;
+
+      final primaryColor = context.colorScheme.primary;
+
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          return _buildMobileCustomBottomSheet(
+            ctx,
+            title: _drawerTitle,
+            subtitle: _drawerSubtitle,
+            icon: _drawerIcon,
+            primaryColor: primaryColor,
+            formBuilder: _drawerFormBuilder ?? formBuilder,
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _activeDrawerId = null;
+        });
+      }
+    }
+  }
+
+  /// 桌面端右侧 380dp 抽屉内容容器（包裹统一 Header 与表单）
+  Widget _buildDesktopDrawerContent(Color primaryColor) {
+    if (_activeDrawerId == 'calendar_sync') {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        child: CalendarSyncPanel(
+          onClose: _closeDrawer,
+          onSyncCompleted: () {
+            if (mounted) setState(() {});
+          },
+          isDrawerMode: true,
+        ),
+      );
+    }
+
+    return StatefulBuilder(
+      builder: (context, setDrawerState) {
+        final colors = context.appColors;
+        return Container(
+          width: 380,
+          color: colors.surfaceModal,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 统一顶部 Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 10, 12),
+                child: Row(
                   children: [
                     Container(
-                      width: 10,
-                      height: 10,
-                      margin: const EdgeInsets.only(top: 6, right: 10),
+                      padding: const EdgeInsets.all(6),
                       decoration: BoxDecoration(
-                        color: appColors.tagWork,
-                        shape: BoxShape.circle,
+                        color: primaryColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        event.title,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: appColors.textPrimary,
-                        ),
-                      ),
-                    ),
-                    if (event.syncedToSystemCalendar)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: appColors.tagWorkContainer,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.check,
-                              size: 12,
-                              color: appColors.tagWork,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              '已入系统日历',
-                              style: TextStyle(
-                                color: appColors.tagWork,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-
-                // 时间段
-                Row(
-                  children: [
-                    Icon(Icons.access_time, size: 16, color: primaryColor),
-                    const SizedBox(width: 8),
-                    Text(
-                      '${_formatDate(event.startTime)}  ${_two(event.startTime.hour)}:${_two(event.startTime.minute)} - ${_two(event.endTime.hour)}:${_two(event.endTime.minute)}',
-                      style: TextStyle(
-                        color: appColors.textSecondary,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-
-                // 地点
-                if (event.location.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(
-                        Icons.location_on_outlined,
-                        size: 16,
-                        color: primaryColor,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          event.location,
-                          style: TextStyle(
-                            color: appColors.textSecondary,
-                            fontSize: 13.5,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-
-                // 说明备注
-                if (event.description.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: appColors.surfaceLow,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: appColors.borderSubtle,
-                      ),
-                    ),
-                    child: Text(
-                      event.description,
-                      style: TextStyle(
-                        color: appColors.textSecondary,
-                        fontSize: 13,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-
-                // 备忘打勾清单
-                if (event.checklist.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    '待办事项清单：',
-                    style: TextStyle(
-                      color: appColors.textSecondary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  ...event.checklist.map((item) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.check_circle_outline,
-                              size: 15,
-                              color: appColors.tagWork,
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                item,
-                                style: TextStyle(
-                                  color: appColors.textPrimary,
-                                  fontSize: 13,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )),
-                ],
-
-                // 原文提取回溯
-                if (event.sourceText.isNotEmpty &&
-                    event.sourceType != 'manual') ...[
-                  const SizedBox(height: 10),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    collapsedIconColor: appColors.textSecondary,
-                    iconColor: primaryColor,
-                    title: Text(
-                      '提取自原始通知内容',
-                      style: TextStyle(
-                        color: appColors.textSecondary,
-                        fontSize: 12,
-                      ),
-                    ),
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: appColors.surfaceLow,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: appColors.borderSubtle,
-                          ),
-                        ),
-                        child: Text(
-                          event.sourceText,
-                          style: TextStyle(
-                            color: appColors.textSecondary,
-                            fontSize: 12,
-                            height: 1.35,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-
-                const SizedBox(height: 16),
-                // 底部动作按钮栏
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: context.colorScheme.error,
-                          side: BorderSide(
-                            color: context.colorScheme.error
-                                .withValues(alpha: 0.5),
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          _confirmDelete(event);
-                        },
-                        icon: const Icon(Icons.delete_outline, size: 16),
-                        label: const Text('删除日程'),
-                      ),
+                      child: Icon(_drawerIcon, color: primaryColor, size: 18),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      flex: 2,
-                      child: FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: event.syncedToSystemCalendar
-                              ? appColors.tagWork
-                              : primaryColor,
-                          foregroundColor: context.colorScheme.onPrimary,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        onPressed: () {
-                          Navigator.pop(ctx);
-                          _writeToCalendar(event);
-                        },
-                        icon: Icon(
-                          event.syncedToSystemCalendar
-                              ? Icons.check
-                              : Icons.calendar_month,
-                          size: 16,
-                        ),
-                        label: Text(
-                          event.syncedToSystemCalendar
-                              ? '再次同步至系统日历'
-                              : '写入系统日历',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _drawerTitle,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.bold,
+                              color: colors.textPrimary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _drawerSubtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.textSecondary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: '关闭面板',
+                      onPressed: _closeDrawer,
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: colors.borderSubtle),
+              // 统一表单内容滚动区
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: _drawerFormBuilder?.call(
+                        context,
+                        setDrawerState,
+                        _closeDrawer,
+                      ) ??
+                      const SizedBox.shrink(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 移动端底部 BottomSheet 容器（带小把手与最大 85% 高度约束）
+  Widget _buildMobileCustomBottomSheet(
+    BuildContext ctx, {
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color primaryColor,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setSheetState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) {
+    final colors = ctx.appColors;
+    return StatefulBuilder(
+      builder: (context, setSheetState) {
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+          ),
+          decoration: BoxDecoration(
+            color: colors.surfaceModal,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 移动端顶部小把手
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 8, bottom: 8),
+                  decoration: BoxDecoration(
+                    color: colors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              // 移动端头部 Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 10, 10),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: primaryColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(_drawerIcon, color: primaryColor, size: 18),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _drawerTitle.isNotEmpty ? _drawerTitle : title,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.bold,
+                              color: colors.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _drawerSubtitle.isNotEmpty ? _drawerSubtitle : subtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: '关闭面板',
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: colors.borderSubtle),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.only(
+                    left: 16,
+                    right: 16,
+                    top: 14,
+                    bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+                  ),
+                  child: formBuilder(
+                    ctx,
+                    setSheetState,
+                    () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 构建日程详情查看视图
+  Widget _buildEventDetailContent(
+    AgendaEvent event,
+    StateSetter setDrawerState,
+    VoidCallback onClose, {
+    required VoidCallback onSwitchToEdit,
+  }) {
+    final appColors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 标题与来源标签
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              margin: const EdgeInsets.only(top: 6, right: 10),
+              decoration: BoxDecoration(
+                color: appColors.tagWork,
+                shape: BoxShape.circle,
+              ),
+            ),
+            Expanded(
+              child: Text(
+                event.title,
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                  color: appColors.textPrimary,
+                ),
+              ),
+            ),
+            if (event.syncedToSystemCalendar)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: appColors.tagWorkContainer,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.check,
+                      size: 12,
+                      color: appColors.tagWork,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '已入系统日历',
+                      style: TextStyle(
+                        color: appColors.tagWork,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // 时间段（支持跨天展示）
+        Row(
+          children: [
+            Icon(Icons.access_time, size: 16, color: primaryColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                AgendaEventCard.isCrossDayEvent(
+                        event.startTime, event.endTime)
+                    ? '${_formatDate(event.startTime)} ${_two(event.startTime.hour)}:${_two(event.startTime.minute)} - ${_formatDate(event.endTime)} ${_two(event.endTime.hour)}:${_two(event.endTime.minute)} (跨天)'
+                    : '${_formatDate(event.startTime)}  ${_two(event.startTime.hour)}:${_two(event.startTime.minute)} - ${_two(event.endTime.hour)}:${_two(event.endTime.minute)}',
+                style: TextStyle(
+                  color: appColors.textSecondary,
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        // 地点
+        if (event.location.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                Icons.location_on_outlined,
+                size: 16,
+                color: primaryColor,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  event.location,
+                  style: TextStyle(
+                    color: appColors.textSecondary,
+                    fontSize: 13.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+
+        // 说明备注
+        if (event.description.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: appColors.surfaceLow,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: appColors.borderSubtle,
+              ),
+            ),
+            child: Text(
+              event.description,
+              style: TextStyle(
+                color: appColors.textSecondary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+
+        // 备忘打勾清单
+        if (event.checklist.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Text(
+            '待办事项清单：',
+            style: TextStyle(
+              color: appColors.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          ...event.checklist.map((item) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.check_circle_outline,
+                      size: 15,
+                      color: appColors.tagWork,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        item,
+                        style: TextStyle(
+                          color: appColors.textPrimary,
+                          fontSize: 13,
                         ),
                       ),
                     ),
                   ],
                 ),
-              ],
+              )),
+        ],
+
+        // 原文提取回溯
+        if (event.sourceText.isNotEmpty &&
+            event.sourceType != 'manual') ...[
+          const SizedBox(height: 10),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            collapsedIconColor: appColors.textSecondary,
+            iconColor: primaryColor,
+            title: Text(
+              '提取自原始通知内容',
+              style: TextStyle(
+                color: appColors.textSecondary,
+                fontSize: 12,
+              ),
             ),
-          );
-        },
-      ),
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: appColors.surfaceLow,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: appColors.borderSubtle,
+                  ),
+                ),
+                child: Text(
+                  event.sourceText,
+                  style: TextStyle(
+                    color: appColors.textSecondary,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+
+        const SizedBox(height: 20),
+        // 操作按钮行：修改日程 + 同步日历 + 删除日程
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: primaryColor,
+                  side: BorderSide(
+                    color: primaryColor.withValues(alpha: 0.5),
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                onPressed: onSwitchToEdit,
+                icon: const Icon(Icons.edit_note, size: 16),
+                label: const Text('修改日程'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: event.syncedToSystemCalendar
+                      ? appColors.tagWork
+                      : primaryColor,
+                  foregroundColor: context.colorScheme.onPrimary,
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                onPressed: () {
+                  _writeToCalendar(event);
+                  setDrawerState(() {});
+                  setState(() {});
+                },
+                icon: Icon(
+                  event.syncedToSystemCalendar
+                      ? Icons.check
+                      : Icons.calendar_month,
+                  size: 16,
+                ),
+                label: Text(
+                  event.syncedToSystemCalendar ? '再次同步' : '入日历',
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: '删除日程',
+              style: IconButton.styleFrom(
+                foregroundColor: context.colorScheme.error,
+              ),
+              onPressed: () {
+                onClose();
+                _confirmDelete(event);
+              },
+              icon: const Icon(Icons.delete_outline, size: 20),
+            ),
+          ],
+        ),
+      ],
     );
   }
+
+  /// 构建日程修改视图（复用 AgendaEventCard 全量可编辑交互）
+  Widget _buildEventEditContent(
+    AgendaEvent event,
+    StateSetter setDrawerState,
+    VoidCallback onClose, {
+    VoidCallback? onSwitchToDetail,
+  }) {
+    final primaryColor = context.colorScheme.primary;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (onSwitchToDetail != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                TextButton.icon(
+                  onPressed: onSwitchToDetail,
+                  icon: const Icon(Icons.arrow_back, size: 16),
+                  label: const Text('返回日程详情'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: primaryColor,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+                Text(
+                  '点选字段直接原地修改',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: context.appColors.textTertiary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        AgendaEventCard(
+          event: event,
+          isDraft: false,
+          showDate: true,
+          onSyncCalendar: () {
+            _writeToCalendar(event);
+            setDrawerState(() {});
+            setState(() {});
+          },
+          onDelete: () {
+            onClose();
+            _confirmDelete(event);
+          },
+          onEventChanged: (updated) {
+            _drawerSubtitle = updated.title;
+            _repo.updateEvent(updated);
+            setDrawerState(() {});
+            setState(() {});
+          },
+        ),
+      ],
+    );
+  }
+
+  /// 打开日程详情抽屉（支持一键平滑切换为修改模式）
+  void _openEventDetailDrawer(AgendaEvent event, {GlobalKey? anchorKey}) {
+    bool isEditingMode = false;
+    _openCustomOptionDrawer(
+      drawerId: 'event_${event.id}',
+      title: '日程详情',
+      subtitle: event.title,
+      icon: Icons.event_note_outlined,
+      anchorKey: anchorKey,
+      formBuilder: (ctx, setDrawerState, onClose) {
+        final currentEvent = _repo.getEventById(event.id) ?? event;
+        if (isEditingMode) {
+          return _buildEventEditContent(
+            currentEvent,
+            setDrawerState,
+            onClose,
+            onSwitchToDetail: () {
+              setDrawerState(() {
+                isEditingMode = false;
+                _drawerTitle = '日程详情';
+                _drawerIcon = Icons.event_note_outlined;
+              });
+              setState(() {
+                _drawerTitle = '日程详情';
+                _drawerIcon = Icons.event_note_outlined;
+              });
+            },
+          );
+        } else {
+          return _buildEventDetailContent(
+            currentEvent,
+            setDrawerState,
+            onClose,
+            onSwitchToEdit: () {
+              setDrawerState(() {
+                isEditingMode = true;
+                _drawerTitle = '修改日程详情';
+                _drawerIcon = Icons.edit_calendar_outlined;
+              });
+              setState(() {
+                _drawerTitle = '修改日程详情';
+                _drawerIcon = Icons.edit_calendar_outlined;
+              });
+            },
+          );
+        }
+      },
+    );
+  }
+
+  /// 打开日程修改抽屉（直接呈现可编辑表单）
+  void _openEventEditDrawer(AgendaEvent event, {GlobalKey? anchorKey}) {
+    bool isEditingMode = true;
+    _openCustomOptionDrawer(
+      drawerId: 'event_${event.id}',
+      title: '修改日程详情',
+      subtitle: event.title,
+      icon: Icons.edit_calendar_outlined,
+      anchorKey: anchorKey,
+      formBuilder: (ctx, setDrawerState, onClose) {
+        final currentEvent = _repo.getEventById(event.id) ?? event;
+        if (isEditingMode) {
+          return _buildEventEditContent(
+            currentEvent,
+            setDrawerState,
+            onClose,
+            onSwitchToDetail: () {
+              setDrawerState(() {
+                isEditingMode = false;
+                _drawerTitle = '日程详情';
+                _drawerIcon = Icons.event_note_outlined;
+              });
+              setState(() {
+                _drawerTitle = '日程详情';
+                _drawerIcon = Icons.event_note_outlined;
+              });
+            },
+          );
+        } else {
+          return _buildEventDetailContent(
+            currentEvent,
+            setDrawerState,
+            onClose,
+            onSwitchToEdit: () {
+              setDrawerState(() {
+                isEditingMode = true;
+                _drawerTitle = '修改日程详情';
+                _drawerIcon = Icons.edit_calendar_outlined;
+              });
+              setState(() {
+                _drawerTitle = '修改日程详情';
+                _drawerIcon = Icons.edit_calendar_outlined;
+              });
+            },
+          );
+        }
+      },
+    );
+  }
+
+  void _showEventDetailSheet(AgendaEvent event) => _openEventDetailDrawer(event);
 
   // ================= 时间跨度弹出选择器（用户核心定制需求） =================
 
@@ -2131,15 +2142,21 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
     return ValueListenableBuilder<List<AgendaEvent>>(
       valueListenable: _repo.eventsNotifier,
       builder: (context, allEvents, _) {
-        // 构建日期 -> 日程列表映射
+        // 构建日期 -> 日程列表映射（支持跨天日程在每一天均展示）
         final eventsMap = <String, List<AgendaEvent>>{};
         for (final ev in allEvents) {
           if (_onlyUpcoming && ev.endTime.isBefore(DateTime.now())) continue;
           if (_onlySynced && !ev.syncedToSystemCalendar) continue;
 
-          final k =
-              '${ev.startTime.year}-${ev.startTime.month}-${ev.startTime.day}';
-          eventsMap.putIfAbsent(k, () => []).add(ev);
+          var cur =
+              DateTime(ev.startTime.year, ev.startTime.month, ev.startTime.day);
+          final endDay =
+              DateTime(ev.endTime.year, ev.endTime.month, ev.endTime.day);
+          while (!cur.isAfter(endDay)) {
+            final k = '${cur.year}-${cur.month}-${cur.day}';
+            eventsMap.putIfAbsent(k, () => []).add(ev);
+            cur = cur.add(const Duration(days: 1));
+          }
         }
 
         // 筛选选中日期当天的日程列表
@@ -2147,68 +2164,131 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
             '${_selectedDate.year}-${_selectedDate.month}-${_selectedDate.day}';
         final selectedDayEvents = eventsMap[selectedKey] ?? [];
 
+        // 若当前正在查看/编辑的日程被删除，折叠关闭抽屉
+        if (_activeDrawerId != null && _activeDrawerId!.startsWith('event_')) {
+          final eventId = _activeDrawerId!.substring(6);
+          final exists = allEvents.any((e) => e.id == eventId);
+          if (!exists) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _closeDrawer();
+            });
+          }
+        }
+
         return LayoutBuilder(
           builder: (context, constraints) {
             final isDesktop = constraints.maxWidth >= 640;
+            _isWide = constraints.maxWidth >= 880;
+            final isDrawerOpen = isDesktop && _activeDrawerId != null;
+            const drawerWidth = 380.0;
 
-            return Container(
-              decoration: BoxDecoration(
-                color: appColors.surfaceCard,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: appColors.borderSubtle,
-                ),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Stack(
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // 主内容区（通过 Expanded 承载；当右侧抽屉滑出时，主界面右边缘向左收窄，界面内容完全不被遮挡）
+                Expanded(
+                  child: Stack(
                     children: [
-                      // 1. 顶部状态栏：月份、相对天数、跨度复选框选择按钮与动作项
-                      _buildTopHeader(allEvents, isDesktop: isDesktop),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          // 1. 顶部状态栏：月份、相对天数、跨度复选框选择按钮与动作项
+                          _buildTopHeader(allEvents, isDesktop: isDesktop),
 
-                      // 2. 搜索条（如展开）
-                      if (_isSearchExpanded) _buildSearchBar(),
+                          // 2. 搜索条（如展开）
+                          if (_isSearchExpanded) _buildSearchBar(),
 
-                      // 3. 核心内容区（桌面端双栏并列无遮挡，移动端单栏流式纵向展示）
-                      Expanded(
-                        child: _viewSpan == AgendaViewSpan.all
-                            ? _buildAllEventsListView(allEvents)
-                            : isDesktop
-                                ? _buildDesktopLayout(
-                                    eventsMap, selectedDayEvents, allEvents,
-                                    width: constraints.maxWidth)
-                                : _buildMobileCalendarAndTimeline(
-                                    eventsMap, selectedDayEvents, allEvents),
+                          // 3. 核心内容区（桌面端双栏并列无遮挡，移动端单栏流式纵向展示）
+                          Expanded(
+                            child: LayoutBuilder(
+                              builder: (context, contentConstraints) {
+                                final contentWidth = contentConstraints.maxWidth;
+                                return _viewSpan == AgendaViewSpan.all
+                                    ? _buildAllEventsListView(allEvents)
+                                    : isDesktop
+                                        ? _buildDesktopLayout(
+                                            eventsMap,
+                                            selectedDayEvents,
+                                            allEvents,
+                                            width: contentWidth,
+                                            totalWidth: constraints.maxWidth,
+                                          )
+                                        : _buildMobileCalendarAndTimeline(
+                                            eventsMap,
+                                            selectedDayEvents,
+                                            allEvents,
+                                          );
+                              },
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
 
-                  // 4. 浮动在右下角的经典“今”字圆形按钮（仅在移动窄屏下悬浮展示，桌面端在控制区内集成，彻底避免遮挡）
-                  if (!isDesktop && _viewSpan != AgendaViewSpan.all)
-                    Positioned(
-                      right: 18,
-                      bottom: 24,
-                      child: FloatingActionButton(
-                        heroTag: 'calendar_today_fab',
-                        mini: false,
-                        backgroundColor: primaryColor,
-                        elevation: 4,
-                        shape: const CircleBorder(),
-                        onPressed: _jumpToToday,
-                        child: Text(
-                          '今',
-                          style: TextStyle(
-                            color: context.colorScheme.onPrimary,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+                      // 4. 浮动在右下角的经典“今”字圆形按钮（仅在移动窄屏下悬浮展示，桌面端在控制区内集成，彻底避免遮挡）
+                      if (!isDesktop && _viewSpan != AgendaViewSpan.all)
+                        Positioned(
+                          right: 18,
+                          bottom: 19,
+                          child: FloatingActionButton(
+                            heroTag: 'calendar_today_fab',
+                            mini: false,
+                            backgroundColor: primaryColor,
+                            elevation: 4,
+                            shape: const CircleBorder(),
+                            onPressed: _jumpToToday,
+                            child: Text(
+                              '今',
+                              style: TextStyle(
+                                color: context.colorScheme.onPrimary,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                           ),
                         ),
+                    ],
+                  ),
+                ),
+
+                // 桌面端专属：从右边平滑推入的抽屉 (符合 DRAWER_DESIGN_SPEC.md 规范)
+                if (isDesktop)
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeInOutCubic,
+                    width: isDrawerOpen ? drawerWidth : 0,
+                    decoration: BoxDecoration(
+                      color: appColors.surfaceModal,
+                      border: Border(
+                        left: BorderSide(
+                          color: appColors.borderSubtle,
+                          width: isDrawerOpen ? 1 : 0,
+                        ),
                       ),
+                      boxShadow: isDrawerOpen
+                          ? [
+                              BoxShadow(
+                                color: context.colorScheme.shadow
+                                    .withValues(alpha: 0.16),
+                                blurRadius: 16,
+                                offset: const Offset(-4, 0),
+                              ),
+                            ]
+                          : null,
                     ),
-                ],
-              ),
+                    clipBehavior: Clip.hardEdge,
+                    child: isDrawerOpen
+                        ? OverflowBox(
+                            minWidth: drawerWidth,
+                            maxWidth: drawerWidth,
+                            alignment: Alignment.topRight,
+                            child: SizedBox(
+                              width: drawerWidth,
+                              child: _buildDesktopDrawerContent(primaryColor),
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+              ],
             );
           },
         );
@@ -2286,28 +2366,24 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
           ),
 
           if (isDesktop) ...[
-            const SizedBox(width: 8),
-            // 桌面端专属：直接集成回今天按钮，免除悬浮遮挡
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: appColors.textPrimary,
-                side: BorderSide(
-                  color: appColors.borderSubtle,
-                ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              ),
-              onPressed: _jumpToToday,
-              icon: Icon(Icons.today, size: 14, color: primaryColor),
-              label: const Text('今天', style: TextStyle(fontSize: 11.5)),
-            ),
             const SizedBox(width: 4),
             IconButton(
               tooltip: '系统日历双向同步中心',
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               padding: const EdgeInsets.all(4),
-              icon: Icon(Icons.sync, size: 20, color: primaryColor),
-              onPressed: _showCalendarSyncModal,
+              style: isDesktop && _isCalendarSyncDrawerOpen
+                  ? IconButton.styleFrom(
+                      backgroundColor: appColors.tagWorkContainer,
+                    )
+                  : null,
+              icon: Icon(
+                Icons.sync,
+                size: 20,
+                color: isDesktop && _isCalendarSyncDrawerOpen
+                    ? appColors.tagWork
+                    : primaryColor,
+              ),
+              onPressed: () => _toggleCalendarSyncDrawer(isDesktop: isDesktop),
             ),
           ],
 
@@ -2390,7 +2466,7 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
             onSelected: (val) {
               switch (val) {
                 case 'calendar_sync':
-                  _showCalendarSyncModal();
+                  _toggleCalendarSyncDrawer(isDesktop: isDesktop);
                   break;
                 case 'sample':
                   _loadSampleSchedules();
@@ -2575,6 +2651,7 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
     List<AgendaEvent> selectedDayEvents,
     List<AgendaEvent> allEvents, {
     double width = 800,
+    double? totalWidth,
   }) {
     final appColors = context.appColors;
     final primaryColor = context.colorScheme.primary;
@@ -2582,14 +2659,15 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
     const wk = ['一', '二', '三', '四', '五', '六', '日'];
     final wkStr = wk[_selectedDate.weekday - 1];
 
-    // 用户核心需求：左侧日历栏与右侧日程栏比例支持鼠标拖动调节
+    // 用户核心需求：桌面端右侧抽屉滑出时，日历表绝对不让位，仅由右侧日程栏收缩让位
+    final baseWidth = totalWidth ?? width;
     final minLeftWidth = 270.0;
-    final maxLeftWidth = math.max(minLeftWidth, width - 300.0);
+    final maxLeftWidth = math.max(minLeftWidth, width - 120.0);
     final defaultLeftWidth =
-        width > 900 ? 370.0 : (width > 720 ? 340.0 : 315.0);
-    final targetRatio = _desktopSplitRatio ?? (defaultLeftWidth / width);
+        baseWidth > 900 ? 370.0 : (baseWidth > 720 ? 340.0 : 315.0);
+    final targetRatio = _desktopSplitRatio ?? (defaultLeftWidth / baseWidth);
     final leftWidth =
-        (width * targetRatio).clamp(minLeftWidth, maxLeftWidth);
+        (baseWidth * targetRatio).clamp(minLeftWidth, maxLeftWidth);
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2597,96 +2675,97 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
         // 左侧主面板：自适应/拖拽调节宽度，专注日历视图与选中状态概览
         SizedBox(
           width: leftWidth,
-          child: Column(
+          child: Stack(
             children: [
-              // 星期标头
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                child: _buildWeekdaysHeader(),
-              ),
+              Column(
+                children: [
+                  // 星期标头
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: _buildWeekdaysHeader(),
+                  ),
 
-              // 日历主体（支持横向滑动或月份切换）
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      _viewSpan == AgendaViewSpan.week
-                          ? _buildWeekViewStrip(eventsMap)
-                          : _viewSpan == AgendaViewSpan.day
-                              ? _buildDayViewBanner()
-                              : _buildMonthCalendarGrid(eventsMap,
-                                  isDesktop: true),
-                      const SizedBox(height: 8),
+                  // 日历主体（支持横向滑动或月份切换）
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          _viewSpan == AgendaViewSpan.week
+                              ? _buildWeekViewStrip(eventsMap)
+                              : _viewSpan == AgendaViewSpan.day
+                                  ? _buildDayViewBanner()
+                                  : _buildMonthCalendarGrid(eventsMap,
+                                      isDesktop: true),
+                          const SizedBox(height: 8),
 
-                      // 左侧：选中日期概况卡片
-                      Container(
-                        margin: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: appColors.surfaceLow,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: appColors.borderSubtle,
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+                          // 左侧：选中日期概况卡片
+                          Container(
+                            margin: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 6),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: appColors.surfaceLow,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: appColors.borderSubtle,
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Container(
-                                  width: 8,
-                                  height: 8,
-                                  decoration: BoxDecoration(
-                                    color: appColors.tagWork,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  '${_selectedDate.month}月${_selectedDate.day}日 周$wkStr',
-                                  style: TextStyle(
-                                    color: appColors.textPrimary,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const Spacer(),
-                                if (info.holidayBadge != null)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: info.isRest
-                                          ? appColors.tagRestContainer
-                                          : appColors.tagLifeContainer,
-                                      borderRadius: BorderRadius.circular(4),
+                                Row(
+                                  children: [
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: appColors.tagWork,
+                                        shape: BoxShape.circle,
+                                      ),
                                     ),
-                                    child: Text(
-                                      info.holidayBadge!,
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '${_selectedDate.month}月${_selectedDate.day}日 周$wkStr',
                                       style: TextStyle(
-                                        color: info.isRest
-                                            ? appColors.tagRest
-                                            : appColors.tagLife,
-                                        fontSize: 10,
+                                        color: appColors.textPrimary,
+                                        fontSize: 14,
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
+                                    const Spacer(),
+                                    if (info.holidayBadge != null)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: info.isRest
+                                              ? appColors.tagRestContainer
+                                              : appColors.tagLifeContainer,
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          info.holidayBadge!,
+                                          style: TextStyle(
+                                            color: info.isRest
+                                                ? appColors.tagRest
+                                                : appColors.tagLife,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '农历 ${info.lunarText}${info.fullFestivalName != null ? " · ${info.fullFestivalName}" : ""}',
+                                  style: TextStyle(
+                                    color: appColors.textSecondary,
+                                    fontSize: 12,
                                   ),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '农历 ${info.lunarText}${info.fullFestivalName != null ? " · ${info.fullFestivalName}" : ""}',
-                              style: TextStyle(
-                                color: appColors.textSecondary,
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
+                                ),
+                                const SizedBox(height: 8),
                                 Text(
                                   '当天排程：${selectedDayEvents.length} 项',
                                   style: TextStyle(
@@ -2697,36 +2776,55 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
                                     fontWeight: FontWeight.w500,
                                   ),
                                 ),
-                                const Spacer(),
-                                TextButton.icon(
-                                  style: TextButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 4),
-                                    minimumSize: Size.zero,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  onPressed: _jumpToToday,
-                                  icon: Icon(
-                                    Icons.today,
-                                    size: 13,
-                                    color: primaryColor,
-                                  ),
-                                  label: Text(
-                                    '回今天',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: primaryColor,
-                                    ),
-                                  ),
-                                ),
                               ],
+                            ),
+                          ),
+                          const SizedBox(height: 48), // 为右下角悬浮今天按钮预留防遮挡空间
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              // 用户核心需求：左半栏右下角圆角矩形悬浮按钮“今天”
+              Positioned(
+                right: 14,
+                bottom: 14,
+                child: Tooltip(
+                  message: '回到今天',
+                  child: Material(
+                    elevation: 3,
+                    shadowColor: Colors.black.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(10),
+                    color: primaryColor,
+                    child: InkWell(
+                      onTap: _jumpToToday,
+                      borderRadius: BorderRadius.circular(10),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 11, vertical: 6.5),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.today,
+                              size: 14,
+                              color: context.colorScheme.onPrimary,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              '今天',
+                              style: TextStyle(
+                                color: context.colorScheme.onPrimary,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 8),
-                    ],
+                    ),
                   ),
                 ),
               ),
@@ -2750,7 +2848,7 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
             setState(() {
               final newLeft = (leftWidth + details.delta.dx)
                   .clamp(minLeftWidth, maxLeftWidth);
-              _desktopSplitRatio = newLeft / width;
+              _desktopSplitRatio = newLeft / baseWidth;
               _persistedDesktopSplitRatio = _desktopSplitRatio;
             });
           },
@@ -3425,14 +3523,19 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
       itemCount: selectedEvents.length,
       itemBuilder: (context, idx) {
         final ev = selectedEvents[idx];
-        return AgendaEventCard(
+        final anchorKey = _tileKeys.putIfAbsent(ev.id, () => GlobalKey());
+        final isEventActive = _activeDrawerId == 'event_${ev.id}';
+        return CompactAgendaCard(
+          key: anchorKey,
           event: ev,
           showDate: false,
           isDraft: false,
+          isEditing: isEventActive,
           onSyncCalendar: () => _writeToCalendar(ev),
           onDelete: () => _confirmDelete(ev),
           onEventChanged: (updated) => _repo.updateEvent(updated),
-          onTap: () => _showEventDetailSheet(ev),
+          onTap: () => _openEventDetailDrawer(ev, anchorKey: anchorKey),
+          onEdit: () => _openEventEditDrawer(ev, anchorKey: anchorKey),
         );
       },
     );
@@ -3495,14 +3598,22 @@ class _MyAgendaPageState extends State<MyAgendaPage> {
                   itemCount: filtered.length,
                   itemBuilder: (context, idx) {
                     final ev = filtered[idx];
-                    return AgendaEventCard(
+                    final anchorKey =
+                        _tileKeys.putIfAbsent(ev.id, () => GlobalKey());
+                    final isEventActive = _activeDrawerId == 'event_${ev.id}';
+                    return CompactAgendaCard(
+                      key: anchorKey,
                       event: ev,
                       showDate: true,
                       isDraft: false,
+                      isEditing: isEventActive,
                       onSyncCalendar: () => _writeToCalendar(ev),
                       onDelete: () => _confirmDelete(ev),
                       onEventChanged: (updated) => _repo.updateEvent(updated),
-                      onTap: () => _showEventDetailSheet(ev),
+                      onTap: () =>
+                          _openEventDetailDrawer(ev, anchorKey: anchorKey),
+                      onEdit: () =>
+                          _openEventEditDrawer(ev, anchorKey: anchorKey),
                     );
                   },
                 ),

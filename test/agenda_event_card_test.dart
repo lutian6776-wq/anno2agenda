@@ -268,4 +268,147 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(TimePickerDialog), findsNothing);
   });
+
+  testWidgets('AgendaEventCard cross-day event display and date picker',
+      (tester) async {
+    final crossEvent = AgendaEvent(
+      id: 'test_cross',
+      title: '通宵编程马拉松',
+      startTime: DateTime(2026, 10, 25, 22, 0),
+      endTime: DateTime(2026, 10, 26, 2, 0),
+      location: '创新工场',
+      description: '需自带充电器',
+      sourceText: '',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AgendaEventCard(
+            event: crossEvent,
+            showDate: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 应该同时展示开始日期与结束日期
+    expect(find.textContaining('10月25日'), findsOneWidget);
+    expect(find.textContaining('10月26日'), findsOneWidget);
+    expect(find.text('22:00'), findsOneWidget);
+    expect(find.text('02:00'), findsOneWidget);
+    expect(find.textContaining('跨天'), findsOneWidget);
+
+    // 点击结束日期胶囊，应弹出 DatePickerDialog
+    await tester.tap(find.textContaining('10月26日'));
+    await tester.pumpAndSettle();
+    expect(find.byType(DatePickerDialog), findsOneWidget);
+
+    final cancelBtn = find.text('Cancel').evaluate().isNotEmpty
+        ? find.text('Cancel')
+        : find.text('取消');
+    await tester.tap(cancelBtn);
+    await tester.pumpAndSettle();
+    expect(find.byType(DatePickerDialog), findsNothing);
+  });
+
+  testWidgets(
+      'CompactAgendaCard displays event, time, location, notice without inline textfield',
+      (tester) async {
+    final event = AgendaEvent(
+      id: 'test_compact',
+      title: '自动化系统开学典礼',
+      startTime: DateTime(2026, 10, 25, 9, 0),
+      endTime: DateTime(2026, 10, 25, 11, 30),
+      location: '大礼堂二楼',
+      description: '请穿正装出席',
+      checklist: ['带校园卡', '提前15分钟到场'],
+      sourceText: '',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CompactAgendaCard(
+            event: event,
+            showDate: true,
+            isDraft: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. 验证事件（标题）
+    expect(find.text('自动化系统开学典礼'), findsOneWidget);
+
+    // 2. 验证时间
+    expect(find.textContaining('10月25日'), findsOneWidget);
+    expect(find.textContaining('09:00'), findsOneWidget);
+    expect(find.textContaining('11:30'), findsOneWidget);
+
+    // 3. 验证地点
+    expect(find.text('大礼堂二楼'), findsOneWidget);
+
+    // 4. 验证须知（备注与待办摘要）
+    expect(find.textContaining('请穿正装出席'), findsOneWidget);
+    expect(find.textContaining('2项待办'), findsOneWidget);
+
+    // 5. 验证精简卡片无原地 TextField 编辑框
+    expect(find.byType(TextField), findsNothing);
+  });
+
+  testWidgets('CompactAgendaCard tap opens modification modal',
+      (tester) async {
+    AgendaEvent current = AgendaEvent(
+      id: 'test_modal',
+      title: '可修改日程',
+      startTime: DateTime(2026, 10, 25, 14, 0),
+      endTime: DateTime(2026, 10, 25, 16, 0),
+      location: '主楼 401',
+      description: '带笔记本电脑',
+      sourceText: '',
+    );
+    AgendaEvent? updatedResult;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CompactAgendaCard(
+            event: current,
+            onEventChanged: (e) => updatedResult = e,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 点击精简卡片本身，应弹出 Modal 抽屉
+    await tester.tap(find.text('可修改日程'));
+    await tester.pumpAndSettle();
+
+    // 抽屉内包含修改标题 "修改日程详情" 与完成按钮
+    expect(find.text('修改日程详情'), findsOneWidget);
+    expect(find.text('完成'), findsOneWidget);
+
+    // 抽屉内渲染了 AgendaEventCard，可点击标题原地编辑
+    await tester.tap(find.text('可修改日程').last);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '在Modal中修改后的新标题');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.check));
+    await tester.pumpAndSettle();
+
+    expect(updatedResult?.title, '在Modal中修改后的新标题');
+
+    // 点击完成关闭 Modal
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('修改日程详情'), findsNothing);
+  });
 }

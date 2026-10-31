@@ -50,7 +50,7 @@ class ModelDownloadProgress {
 }
 
 class LocalModelManager {
-  /// 国内高速直链模型库（基于最新 Qwen3.5 混合线性注意力多模态小模型，对接阿里云魔搭 ModelScope 直链）
+  /// 国内高速直链模型库（包含 Qwen3.5 与讯飞星火 Spark-X2.5 端侧量化模型，对接阿里云魔搭 ModelScope 直链）
   static const List<BuiltInModelSpec> catalog = [
     BuiltInModelSpec(
       id: 'qwen3.5-0.8b',
@@ -72,6 +72,28 @@ class LocalModelManager {
           'https://modelscope.cn/models/unsloth/Qwen3.5-2B-GGUF/resolve/master/Qwen3.5-2B-Q4_K_M.gguf',
       expectedSizeMB: 1350,
       description: '原生融合视觉理解、工具调用与思维链控制（支持 think:false 秒级输出 JSON），轻松拆解多节点长通知与视频字幕。',
+      recommendedForMobile: false,
+    ),
+    BuiltInModelSpec(
+      id: 'spark-x2.5-1.7b',
+      name: '讯飞星火 Spark-X2.5-1.7B',
+      tag: '推荐手机与轻薄本 · 约 1.1GB',
+      fileName: 'Spark-X2.5-1.7B-Q4_K_M.gguf',
+      downloadUrl:
+          'https://modelscope.cn/models/XHToken/Spark-X2.5-1.7B-GGUF/resolve/master/Spark-X2.5-1.7B-Q4_K_M.gguf',
+      expectedSizeMB: 1140,
+      description: '科大讯飞星火轻量端侧模型，原生 100 万超长上下文与混合注意力架构，低功耗高能效，适合移动端日常通知拆解。',
+      recommendedForMobile: true,
+    ),
+    BuiltInModelSpec(
+      id: 'spark-x2.5-4b',
+      name: '讯飞星火 Spark-X2.5-4B',
+      tag: '推荐桌面端与旗舰机 · 约 2.4GB',
+      fileName: 'Spark-X2.5-4B-Q4_K_M.gguf',
+      downloadUrl:
+          'https://modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF/resolve/master/Spark-X2.5-4B-Q4_K_M.gguf',
+      expectedSizeMB: 2480,
+      description: '科大讯飞星火全能端侧模型，支持 100 万长上下文、复杂推理与工具调用，高精度提炼多日程长通知。',
       recommendedForMobile: false,
     ),
   ];
@@ -109,6 +131,10 @@ class LocalModelManager {
   static LlamaController? _androidLlamaController;
   static String? _loadedAndroidModelPath;
 
+  /// Windows 端独立守护进程中当前挂载的模型文件路径
+  static String? _loadedWindowsModelPath;
+  static String? get loadedWindowsModelPath => _loadedWindowsModelPath;
+
   /// 模型常驻与生命周期状态
   static bool _isModelLoading = false;
   static bool get isModelLoading => _isModelLoading;
@@ -124,26 +150,87 @@ class LocalModelManager {
   /// 设置项：展开悬浮窗时是否提前自动预热模型
   static bool autoPreloadOnOverlayExpand = true;
 
-  /// 高级设置项：模型上下文大小（默认 4096）
-  static int contextSize = 4096;
+  /// 高级设置项：模型上下文大小（默认 2048）
+  static int contextSize = 2048;
 
-  /// 高级设置项：思考与生成 Token 上限（默认 1024）
-  static int maxThinkingTokens = 1024;
+  /// 高级设置项：思考与生成 Token 上限（默认 1536）
+  static int maxThinkingTokens = 1536;
 
-  /// 高级设置项：采样温度（默认 0.1）
-  static double temperature = 0.1;
+  /// 高级设置项：采样温度（默认 0.30）
+  static double temperature = 0.30;
 
-  /// 高级设置项：核采样阈值 Top-P（默认 0.85）
-  static double topP = 0.85;
+  /// 高级设置项：核采样阈值 Top-P（默认 0.90）
+  static double topP = 0.90;
 
-  /// 高级设置项：重复词惩罚 Repeat Penalty（默认 1.05）
-  static double repeatPenalty = 1.05;
+  /// 高级设置项：重复词惩罚 Repeat Penalty（默认 1.10）
+  static double repeatPenalty = 1.10;
 
   static int? _loadedContextSize;
 
   /// 空闲释放定时器与外部通知回调
   static Timer? _idleTimer;
   static void Function(String statusMsg)? onModelStatusChanged;
+
+  /// 将模型标识符或文件名标准化为统一的模型 ID（若属于预置库则转为 spec.id，否则保留纯文件名）
+  static String normalizeModelId(String idOrName) {
+    var raw = idOrName.trim();
+    if (raw.contains('/') || raw.contains('\\')) {
+      raw = raw.split(RegExp(r'[\\/]')).last.trim();
+    }
+    final lower = raw.toLowerCase();
+    for (final spec in catalog) {
+      if (spec.id.toLowerCase() == lower ||
+          spec.fileName.toLowerCase() == lower) {
+        return spec.id;
+      }
+    }
+    return raw;
+  }
+
+  /// 判断两个模型标识符（如 spec.id 与 fileName）是否指向同一模型
+  static bool isSameModel(String? a, String? b) {
+    if (a == null || b == null) return false;
+    if (a == b) return true;
+    final normA = normalizeModelId(a).toLowerCase();
+    final normB = normalizeModelId(b).toLowerCase();
+    if (normA == normB) return true;
+    return a.toLowerCase().trim() == b.toLowerCase().trim();
+  }
+
+  /// 获取友好的模型显示名称（预置模型显示如「Qwen3.5-0.8B 极速端侧版」，自定义模型显示文件名）
+  static String getModelDisplayName(String idOrName) {
+    var raw = idOrName.trim();
+    if (raw.contains('/') || raw.contains('\\')) {
+      raw = raw.split(RegExp(r'[\\/]')).last.trim();
+    }
+    final lower = raw.toLowerCase();
+    for (final spec in catalog) {
+      if (spec.id.toLowerCase() == lower ||
+          spec.fileName.toLowerCase() == lower) {
+        return spec.name;
+      }
+    }
+    return raw;
+  }
+
+  /// 探活 llama-server 是否在指定端口就绪运行（返回 200 即为就绪完成）
+  static Future<bool> isLlamaServerHealthy({
+    String host = '127.0.0.1',
+    int port = 11434,
+  }) async {
+    final client =
+        createDirectHttpClient(timeout: const Duration(milliseconds: 600));
+    try {
+      final req = await client.getUrl(Uri.parse('http://$host:$port/health'));
+      final resp =
+          await req.close().timeout(const Duration(milliseconds: 800));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close();
+    }
+  }
 
   /// 检查大模型当前是否已常驻在内存/显存中
   static Future<bool> isModelLoadedInRam() async {
@@ -157,19 +244,17 @@ class LocalModelManager {
         return false;
       }
     } else if (Platform.isWindows) {
-      // 优先通过 Ollama 原生 /api/ps 查询真实常驻内存/显存的模型
+      // 1. 若 llama-server 处于 200 就绪状态，模型必然已挂载常驻显存/内存
+      if (await isLlamaServerHealthy()) {
+        return true;
+      }
+      // 2. 尝试 Ollama 原生 /api/ps 查询
       final active = await queryActiveMemoryModels();
       if (active.isNotEmpty) {
         _currentlyLoadedModelId ??= active.first;
         return true;
       }
-      // 若 /api/ps 明确返回空（无模型常驻），同步清空 _currentlyLoadedModelId
-      final localServerRunning = (await queryRunningLocalModels()).isNotEmpty;
-      if (localServerRunning) {
-        _currentlyLoadedModelId = null;
-        return false;
-      }
-      return _currentlyLoadedModelId != null;
+      return false;
     }
     return false;
   }
@@ -251,10 +336,86 @@ class LocalModelManager {
         onModelStatusChanged?.call('🟢 端侧模型预热完成，已就绪');
         return true;
       } else if (Platform.isWindows) {
-        final models = await ensureLocalRuntimeAndListModels();
+        final models = await ensureLocalRuntimeAndListModels(
+          preferredModelId: preferredModelId,
+        );
         final target = (preferredModelId != null && preferredModelId.isNotEmpty)
             ? preferredModelId
-            : (models.isNotEmpty ? models.first : 'qwen3.5:2b');
+            : (models.isNotEmpty ? models.first : 'qwen3.5-0.8b');
+
+        final targetGguf = await findLocalGgufFile(target);
+        final bundledServer = findBundledLlamaServer();
+
+        if (bundledServer != null && targetGguf != null && targetGguf.existsSync()) {
+          // 检查当前 llama-server 是否已经在运行该具体模型文件
+          final isHealthy = await isLlamaServerHealthy();
+          if (isHealthy &&
+              _loadedWindowsModelPath != null &&
+              _loadedWindowsModelPath!.toLowerCase() == targetGguf.path.toLowerCase()) {
+            _currentlyLoadedModelId = target;
+            markActivity();
+            onModelStatusChanged?.call('🟢 本地大模型已就绪 (${getModelDisplayName(target)})');
+            return true;
+          }
+
+          // 模型不匹配或服务未就绪：重启切换 llama-server 挂载目标模型
+          onModelStatusChanged?.call(
+            '⏳ 正在切换并加载模型权重至 GPU: ${targetGguf.path.split(Platform.pathSeparator).last}...',
+          );
+          if (_managedRuntimeProcess != null) {
+            try {
+              _managedRuntimeProcess!.kill();
+            } catch (_) {}
+            _managedRuntimeProcess = null;
+          }
+          try {
+            await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
+          } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 300));
+
+          final runtimeDir = bundledServer.parent.path;
+          final cleanEnv = Map<String, String>.from(Platform.environment)
+            ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
+            ..['HTTP_PROXY'] = ''
+            ..['HTTPS_PROXY'] = ''
+            ..['http_proxy'] = ''
+            ..['https_proxy'] = ''
+            ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
+
+          _managedRuntimeProcess = await Process.start(
+            bundledServer.path,
+            [
+              '-m',
+              targetGguf.path,
+              '--port',
+              '11434',
+              '--host',
+              '0.0.0.0',
+              '-ngl',
+              '99',
+              '-c',
+              '4096',
+            ],
+            workingDirectory: runtimeDir,
+            environment: cleanEnv,
+            mode: ProcessStartMode.detached,
+          );
+
+          for (var i = 0; i < 25; i++) {
+            await Future.delayed(const Duration(milliseconds: 600));
+            if (await isLlamaServerHealthy()) {
+              _loadedWindowsModelPath = targetGguf.path;
+              _currentlyLoadedModelId = target;
+              markActivity();
+              onModelStatusChanged?.call(
+                '🟢 本地模型已就绪 (${getModelDisplayName(target)})',
+              );
+              return true;
+            }
+          }
+          onModelStatusChanged?.call('⚠️ 本地模型加载超时，请检查 GPU 显存');
+          return false;
+        }
 
         final client = createDirectHttpClient(timeout: const Duration(seconds: 4));
         try {
@@ -271,7 +432,6 @@ class LocalModelManager {
           final resp = await req.close();
           if (resp.statusCode == 404) {
             await resp.drain();
-            // 兼容 llama-server: 检测 /health 探活
             final healthReq = await client.getUrl(Uri.parse('http://127.0.0.1:11434/health'));
             final healthResp = await healthReq.close();
             await healthResp.drain();
@@ -329,6 +489,12 @@ class LocalModelManager {
           } catch (_) {}
           _managedRuntimeProcess = null;
         }
+        try {
+          await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 200));
+        _loadedWindowsModelPath = null;
+        _currentlyLoadedModelId = null;
 
         // 先查询当前常驻在显存/内存中的模型列表（针对外部 Ollama）
         final activeList = await queryActiveMemoryModels();
@@ -387,6 +553,47 @@ class LocalModelManager {
     return null;
   }
 
+  /// 获取所有可能存在 GGUF 模型的候选目录列表（按优先级排序）
+  static List<Directory> getCandidateModelDirectories() {
+    if (Platform.isAndroid) {
+      final base =
+          _cachedAndroidModelsDir ?? '/data/local/tmp/anno2agenda_models';
+      return [Directory(base)];
+    }
+
+    final candidatePaths = <String>{};
+
+    // 1. 可执行文件同级 models（针对发布构建输出或绿色包）
+    final exeParent = File(Platform.resolvedExecutable).parent.path;
+    candidatePaths.add('$exeParent${Platform.pathSeparator}models');
+
+    // 2. 当前工作运行目录 models
+    candidatePaths.add('${Directory.current.path}${Platform.pathSeparator}models');
+
+    // 3. 从当前工作目录向上回溯 5 层（如工程根目录 models）
+    var probeDir = Directory.current;
+    for (var i = 0; i < 5; i++) {
+      candidatePaths.add('${probeDir.path}${Platform.pathSeparator}models');
+      final parent = probeDir.parent;
+      if (parent.path == probeDir.path) break;
+      probeDir = parent;
+    }
+
+    // 4. 从可执行文件所在目录向上回溯 5 层（如 build/windows/x64/runner/Release -> 项目根目录）
+    var exeProbe = File(Platform.resolvedExecutable).parent;
+    for (var i = 0; i < 5; i++) {
+      candidatePaths.add('${exeProbe.path}${Platform.pathSeparator}models');
+      final parent = exeProbe.parent;
+      if (parent.path == exeProbe.path) break;
+      exeProbe = parent;
+    }
+
+    return candidatePaths
+        .map((p) => Directory(p))
+        .where((d) => d.existsSync())
+        .toList();
+  }
+
   /// 获取本地 `.gguf` 模型存放目录（支持直接将模型放入该目录制作绿色离线完整版）
   static Future<Directory> getModelsDirectory() async {
     if (Platform.isAndroid) {
@@ -398,51 +605,35 @@ class LocalModelManager {
       }
       return dir;
     } else {
-      // 1. 优先探测可执行文件同级 models
-      final exeParent = File(Platform.resolvedExecutable).parent.path;
-      final exeModels = Directory('$exeParent${Platform.pathSeparator}models');
-      if (exeModels.existsSync() &&
-          exeModels.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
-        return exeModels;
+      final dirs = getCandidateModelDirectories();
+      // 优先返回已有 GGUF 文件的目录中优先级最高者
+      for (final d in dirs) {
+        try {
+          if (d.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
+            return d;
+          }
+        } catch (_) {}
       }
 
-      // 2. 探测当前运行工作目录 models
-      final curModels =
-          Directory('${Directory.current.path}${Platform.pathSeparator}models');
-      if (curModels.existsSync() &&
-          curModels.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
-        return curModels;
-      }
+      // 其次返回已有 models 目录中优先级最高者
+      if (dirs.isNotEmpty) return dirs.first;
 
-      // 3. 向上逐级回溯寻找包含 GGUF 模型的 models 目录（例如从 build/windows/Release 回溯到根目录）
-      var probeDir = Directory.current;
-      for (var i = 0; i < 5; i++) {
-        final candidate =
-            Directory('${probeDir.path}${Platform.pathSeparator}models');
-        if (candidate.existsSync() &&
-            candidate.listSync().whereType<File>().any((e) => e.path.toLowerCase().endsWith('.gguf'))) {
-          return candidate;
-        }
-        final parent = probeDir.parent;
-        if (parent.path == probeDir.path) break;
-        probeDir = parent;
+      // 若均不存在，默认在可执行文件同级创建 models
+      final defaultDir = Directory(
+        '${File(Platform.resolvedExecutable).parent.path}${Platform.pathSeparator}models',
+      );
+      if (!defaultDir.existsSync()) {
+        await defaultDir.create(recursive: true);
       }
-
-      // 若未找到已有模型目录，优先返回已有目录或当前工作目录 models
-      if (exeModels.existsSync()) return exeModels;
-      if (!curModels.existsSync()) {
-        await curModels.create(recursive: true);
-      }
-      return curModels;
+      return defaultDir;
     }
   }
 
   /// 检查某个预置 GGUF 模型是否已下载到本地
   static Future<bool> isModelDownloaded(BuiltInModelSpec spec) async {
     try {
-      final dir = await getModelsDirectory();
-      final file = File('${dir.path}${Platform.pathSeparator}${spec.fileName}');
-      if (!file.existsSync()) return false;
+      final file = await findLocalGgufFile(spec.id);
+      if (file == null || !file.existsSync()) return false;
       final lenMB = file.lengthSync() / (1024 * 1024);
       // 文件大小达到预期的 85% 以上视为完整下载
       return lenMB >= spec.expectedSizeMB * 0.85;
@@ -451,16 +642,31 @@ class LocalModelManager {
     }
   }
 
-  /// 获取已下载到本地的 `.gguf` 文件列表
+  /// 获取已下载到本地的 `.gguf` 文件列表（扫描所有候选目录并智能按文件名去重）
   static Future<List<File>> listDownloadedGgufFiles() async {
     try {
-      final dir = await getModelsDirectory();
-      if (!dir.existsSync()) return [];
-      return dir
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.toLowerCase().endsWith('.gguf'))
-          .toList();
+      final dirs = getCandidateModelDirectories();
+      final seenNames = <String>{};
+      final result = <File>[];
+
+      for (final dir in dirs) {
+        if (!dir.existsSync()) continue;
+        try {
+          final files = dir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.toLowerCase().endsWith('.gguf'));
+          for (final f in files) {
+            final fileName =
+                f.path.split(Platform.pathSeparator).last.toLowerCase();
+            if (!seenNames.contains(fileName)) {
+              seenNames.add(fileName);
+              result.add(f);
+            }
+          }
+        } catch (_) {}
+      }
+      return result;
     } catch (_) {
       return [];
     }
@@ -472,9 +678,13 @@ class LocalModelManager {
     if (files.isEmpty) return null;
 
     if (preferredIdOrName != null && preferredIdOrName.isNotEmpty) {
+      final cleanTarget = (preferredIdOrName.contains('/') || preferredIdOrName.contains('\\'))
+          ? preferredIdOrName.split(RegExp(r'[\\/]')).last.trim().toLowerCase()
+          : preferredIdOrName.trim().toLowerCase();
+
       for (final spec in catalog) {
-        if (spec.id == preferredIdOrName ||
-            spec.fileName.toLowerCase() == preferredIdOrName.toLowerCase()) {
+        if (spec.id.toLowerCase() == cleanTarget ||
+            spec.fileName.toLowerCase() == cleanTarget) {
           for (final f in files) {
             if (f.path.toLowerCase().endsWith(spec.fileName.toLowerCase())) {
               return f;
@@ -483,7 +693,13 @@ class LocalModelManager {
         }
       }
       for (final f in files) {
-        if (f.path.toLowerCase().contains(preferredIdOrName.toLowerCase())) {
+        final fName = f.path.split(Platform.pathSeparator).last.toLowerCase();
+        if (fName == cleanTarget) {
+          return f;
+        }
+      }
+      for (final f in files) {
+        if (f.path.toLowerCase().contains(cleanTarget)) {
           return f;
         }
       }
@@ -754,9 +970,9 @@ class LocalModelManager {
                 .generate(
                   prompt: rescuePrompt,
                   maxTokens: 512,
-                  temperature: 0.1,
-                  topP: 0.85,
-                  repeatPenalty: 1.05,
+                  temperature: temperature,
+                  topP: topP,
+                  repeatPenalty: repeatPenalty,
                 )
                 .listen(
               (tok) {
@@ -869,8 +1085,12 @@ class LocalModelManager {
     return client;
   }
 
-  /// 自动检测并静默启动本地大模型推理运行时（支持 Android 内嵌 llama.cpp 与 Windows 守护进程）
-  static Future<List<String>> ensureLocalRuntimeAndListModels() async {
+  /// 自动检测并返回本地大模型列表（支持 Android 内嵌与 Windows 磁盘/服务发现）
+  /// [autoStart] 为 false（默认）时仅执行只读扫描探测，绝不唤起后台服务或占用显存
+  static Future<List<String>> ensureLocalRuntimeAndListModels({
+    String? preferredModelId,
+    bool autoStart = false,
+  }) async {
     // 1. Android 端：直接扫描手机沙盒内已下载的 GGUF 模型（由内置 llama_flutter_android 引擎直接加载）
     if (Platform.isAndroid) {
       final androidModels = <String>[];
@@ -891,86 +1111,109 @@ class LocalModelManager {
       return androidModels;
     }
 
-    // 2. Windows 端：查询或自动拉起本地推理服务
-    final activeModels = await queryRunningLocalModels();
-    if (activeModels.isNotEmpty) {
-      return activeModels;
-    }
+    // 2. Windows 端：全量扫描本地磁盘 models 目录中所有 GGUF 模型（包含官方与自定义导入）
+    final allDiscoveredModels = <String>[];
+    final ggufFiles = await listDownloadedGgufFiles();
 
-    if (Platform.isWindows) {
-      final bundledServer = findBundledLlamaServer();
-      final ggufFiles = await listDownloadedGgufFiles();
-      if (bundledServer != null && ggufFiles.isNotEmpty) {
-        try {
-          final runtimeDir = bundledServer.parent.path;
-          final cleanEnv = Map<String, String>.from(Platform.environment)
-            ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
-            ..['HTTP_PROXY'] = ''
-            ..['HTTPS_PROXY'] = ''
-            ..['http_proxy'] = ''
-            ..['https_proxy'] = ''
-            ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
-
-          _managedRuntimeProcess ??= await Process.start(
-            bundledServer.path,
-            [
-              '-m',
-              ggufFiles.first.path,
-              '--port',
-              '11434',
-              '--host',
-              '0.0.0.0',
-              '-ngl',
-              '99',
-              '-c',
-              '4096',
-            ],
-            workingDirectory: runtimeDir,
-            environment: cleanEnv,
-            mode: ProcessStartMode.detached,
-          );
-          // 等待 llama-server 初始化并载入 GPU 显存（模型加载时返回 503，就绪后返回 200）
-          for (var i = 0; i < 20; i++) {
-            await Future.delayed(const Duration(milliseconds: 600));
-            final models = await queryRunningLocalModels();
-            if (models.isNotEmpty) {
-              return models;
-            }
-          }
-        } catch (_) {}
-      }
-
-      final localAppData = Platform.environment['LOCALAPPDATA'] ?? '';
-      final ollamaExe = File('$localAppData\\Programs\\Ollama\\ollama.exe');
-      if (ollamaExe.existsSync()) {
-        try {
-          final cleanEnv = Map<String, String>.from(Platform.environment)
-            ..['HTTP_PROXY'] = ''
-            ..['HTTPS_PROXY'] = ''
-            ..['http_proxy'] = ''
-            ..['https_proxy'] = ''
-            ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0'
-            ..['OLLAMA_HOST'] = '0.0.0.0:11434';
-
-          _managedRuntimeProcess ??= await Process.start(
-            ollamaExe.path,
-            ['serve'],
-            environment: cleanEnv,
-            mode: ProcessStartMode.detached,
-          );
-
-          for (var i = 0; i < 7; i++) {
-            await Future.delayed(const Duration(milliseconds: 500));
-            final models = await queryRunningLocalModels();
-            if (models.isNotEmpty) {
-              return models;
-            }
-          }
-        } catch (_) {}
+    // 2.1 官方预置库匹配项（使用规范 spec.id）
+    for (final spec in catalog) {
+      final exists = ggufFiles.any((f) =>
+          f.path.split(Platform.pathSeparator).last.toLowerCase() ==
+          spec.fileName.toLowerCase());
+      if (exists && !allDiscoveredModels.contains(spec.id)) {
+        allDiscoveredModels.add(spec.id);
       }
     }
 
-    return queryRunningLocalModels();
+    // 2.2 用户放入 models 目录的外部自定义 GGUF 文件（使用其完整文件名）
+    for (final f in ggufFiles) {
+      final name = f.path.split(Platform.pathSeparator).last;
+      final isCatalog = catalog.any(
+          (s) => s.fileName.toLowerCase() == name.toLowerCase());
+      if (!isCatalog && !allDiscoveredModels.contains(name)) {
+        allDiscoveredModels.add(name);
+      }
+    }
+
+    // 2.3 探测外部运行的服务（如外部独立启动的 llama-server 或 Ollama）
+    final runningModels = await queryRunningLocalModels();
+    for (final r in runningModels) {
+      final norm = normalizeModelId(r);
+      final alreadyExists = allDiscoveredModels.any(
+        (existing) => isSameModel(existing, norm) || isSameModel(existing, r),
+      );
+      if (!alreadyExists) {
+        allDiscoveredModels.add(norm);
+      }
+    }
+
+    // 2.4 仅在显式传入 autoStart: true 且本地服务未就绪时，才自动唤起 llama-server
+    if (autoStart && Platform.isWindows && ggufFiles.isNotEmpty) {
+      final isHealthy = await isLlamaServerHealthy();
+      if (!isHealthy) {
+        final bundledServer = findBundledLlamaServer();
+        if (bundledServer != null) {
+          final targetFile = (preferredModelId != null)
+              ? (await findLocalGgufFile(preferredModelId)) ?? ggufFiles.first
+              : ggufFiles.first;
+          try {
+            final runtimeDir = bundledServer.parent.path;
+            final cleanEnv = Map<String, String>.from(Platform.environment)
+              ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
+              ..['HTTP_PROXY'] = ''
+              ..['HTTPS_PROXY'] = ''
+              ..['http_proxy'] = ''
+              ..['https_proxy'] = ''
+              ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
+
+            _managedRuntimeProcess ??= await Process.start(
+              bundledServer.path,
+              [
+                '-m',
+                targetFile.path,
+                '--port',
+                '11434',
+                '--host',
+                '0.0.0.0',
+                '-ngl',
+                '99',
+                '-c',
+                '4096',
+              ],
+              workingDirectory: runtimeDir,
+              environment: cleanEnv,
+              mode: ProcessStartMode.detached,
+            );
+            _loadedWindowsModelPath = targetFile.path;
+
+            for (var i = 0; i < 20; i++) {
+              await Future.delayed(const Duration(milliseconds: 600));
+              if (await isLlamaServerHealthy()) {
+                _currentlyLoadedModelId = normalizeModelId(
+                    targetFile.path.split(RegExp(r'[\\/]')).last);
+                break;
+              }
+            }
+          } catch (_) {}
+        }
+      } else {
+        if (_currentlyLoadedModelId == null && runningModels.isNotEmpty) {
+          _currentlyLoadedModelId = normalizeModelId(runningModels.first);
+        }
+      }
+    } else if (Platform.isWindows) {
+      final isHealthy = await isLlamaServerHealthy();
+      if (!isHealthy) {
+        _loadedWindowsModelPath = null;
+        _currentlyLoadedModelId = null;
+      } else {
+        if (_currentlyLoadedModelId == null && runningModels.isNotEmpty) {
+          _currentlyLoadedModelId = normalizeModelId(runningModels.first);
+        }
+      }
+    }
+
+    return allDiscoveredModels;
   }
 
   /// 查询本地正在运行的推理引擎（127.0.0.1:11434）中已挂载的模型列表（自适应 Ollama 与 llama-server）
@@ -1015,6 +1258,8 @@ class LocalModelManager {
           final list = (decoded['data'] as List)
               .map((m) => (m as Map)['id']?.toString() ?? '')
               .where((name) => name.isNotEmpty)
+              .map((name) => name.split(RegExp(r'[\\/]')).last.trim())
+              .where((name) => name.isNotEmpty)
               .toList();
           if (list.isNotEmpty) return list;
         }
@@ -1032,9 +1277,14 @@ class LocalModelManager {
       final resp =
           await req.close().timeout(const Duration(milliseconds: 1000));
       if (resp.statusCode == 200) {
+        if (_loadedWindowsModelPath != null) {
+          final name = _loadedWindowsModelPath!.split(RegExp(r'[\\/]')).last;
+          return [normalizeModelId(name)];
+        }
         final ggufFiles = await listDownloadedGgufFiles();
         if (ggufFiles.isNotEmpty) {
-          return [ggufFiles.first.path.split(Platform.pathSeparator).last];
+          final name = ggufFiles.first.path.split(RegExp(r'[\\/]')).last;
+          return [normalizeModelId(name)];
         }
         return ['llama-server:default'];
       }
@@ -1447,6 +1697,43 @@ class LocalModelManager {
         return true;
       }
       return false;
+    }
+
+    // Windows 端处理：优先处理本地 GGUF 文件删除与进程句柄释放
+    for (final spec in catalog) {
+      if (spec.id == modelName || spec.fileName == modelName) {
+        final freed = await deleteDownloadedModel(spec);
+        if (freed > 0) return true;
+      }
+    }
+    final targetFile = await findLocalGgufFile(modelName);
+    if (targetFile != null && targetFile.existsSync()) {
+      if (_managedRuntimeProcess != null ||
+          (_loadedWindowsModelPath != null &&
+              _loadedWindowsModelPath!.toLowerCase() == targetFile.path.toLowerCase())) {
+        try {
+          _managedRuntimeProcess?.kill();
+        } catch (_) {}
+        _managedRuntimeProcess = null;
+        _loadedWindowsModelPath = null;
+        _currentlyLoadedModelId = null;
+        try {
+          await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      try {
+        await targetFile.delete();
+        // 尝试拉起剩余首个模型（如果有）
+        final remaining = await listDownloadedGgufFiles();
+        if (remaining.isNotEmpty) {
+          final nextId = normalizeModelId(
+            remaining.first.path.split(Platform.pathSeparator).last,
+          );
+          await preloadModel(preferredModelId: nextId);
+        }
+        return true;
+      } catch (_) {}
     }
 
     final client =

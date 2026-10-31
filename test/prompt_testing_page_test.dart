@@ -111,9 +111,33 @@ void main() {
     expect(find.text('{TIME_ANCHOR} 宏'), findsOneWidget);
     expect(find.text('恢复默认'), findsOneWidget);
     expect(find.textContaining('🚀 运行提示词推理测试'), findsOneWidget);
+    expect(find.text('直接解析外来 JSON'), findsOneWidget);
+    expect(find.text('立即解析外来 JSON'), findsOneWidget);
+    expect(find.text('格式化 JSON'), findsOneWidget);
+
+    // Test direct external JSON parsing
+    final jsonFieldFinder = find.byWidgetPredicate((w) =>
+        w is TextField &&
+        w.decoration?.hintText?.contains('在此粘贴或输入外来 JSON') == true);
+    await tester.ensureVisible(jsonFieldFinder);
+    await tester.enterText(
+      jsonFieldFinder,
+      '''{"events": [{"title": "外来测试日程", "startTime": "2026-11-01T10:00:00", "endTime": "2026-11-01T11:00:00"}]}''',
+    );
+    await tester.pumpAndSettle();
+
+    final parseBtnFinder = find.text('立即解析外来 JSON');
+    await tester.ensureVisible(parseBtnFinder);
+    await tester.tap(parseBtnFinder);
+    await tester.pumpAndSettle();
+
+    expect(find.text('外来测试日程'), findsOneWidget);
 
     // Wait for async local model loader timer
-    await tester.pumpAndSettle(const Duration(seconds: 5));
+    for (var i = 0; i < 25; i++) {
+      await tester.pump(const Duration(milliseconds: 650));
+    }
+    await tester.pumpAndSettle();
 
     await tester.binding.setSurfaceSize(null);
   });

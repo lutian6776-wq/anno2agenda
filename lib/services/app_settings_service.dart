@@ -29,11 +29,11 @@ class AppSettingsService {
   bool _syncDeleteFromSystemCalendar = true;
 
   // 高级模型推理与采样参数
-  int _contextSize = 4096;
-  int _maxThinkingTokens = 1024;
-  double _temperature = 0.1;
-  double _topP = 0.85;
-  double _repeatPenalty = 1.05;
+  int _contextSize = 2048;
+  int _maxThinkingTokens = 1536;
+  double _temperature = 0.30;
+  double _topP = 0.90;
+  double _repeatPenalty = 1.10;
 
   // Getters
   AIEngineMode get engineMode => _engineMode;
@@ -54,23 +54,23 @@ class AppSettingsService {
   // --- 边界常量定义 ---
   static const int minContextSize = 512;
   static const int maxContextSize = 32768;
-  static const int defaultContextSize = 4096;
+  static const int defaultContextSize = 2048;
 
   static const int minThinkingTokens = 128;
   static const int maxThinkingTokensLimit = 4096;
-  static const int defaultThinkingTokens = 1024;
+  static const int defaultThinkingTokens = 1536;
 
   static const double minTemperature = 0.0;
   static const double maxTemperature = 1.5;
-  static const double defaultTemperature = 0.1;
+  static const double defaultTemperature = 0.30;
 
   static const double minTopP = 0.1;
   static const double maxTopP = 1.0;
-  static const double defaultTopP = 0.85;
+  static const double defaultTopP = 0.90;
 
   static const double minRepeatPenalty = 1.0;
   static const double maxRepeatPenalty = 2.0;
-  static const double defaultRepeatPenalty = 1.05;
+  static const double defaultRepeatPenalty = 1.10;
 
   Future<File> _resolveSettingsFile([String? baseDir]) async {
     if (baseDir != null && baseDir.isNotEmpty) {

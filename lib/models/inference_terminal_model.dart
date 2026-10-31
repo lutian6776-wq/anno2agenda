@@ -19,7 +19,10 @@ class InferenceTerminalModel extends ChangeNotifier {
   final StringBuffer _tokenBuffer = StringBuffer();
   int _tokenCount = 0;
   double _elapsedSeconds = 0.0;
+  double _generationElapsedSeconds = 0.0;
+  bool _hasReceivedFirstToken = false;
   Stopwatch? _stopwatch;
+  Stopwatch? _generationStopwatch;
   Timer? _ticker;
 
   /// 是否正在进行端侧/远端模型推理提取
@@ -34,21 +37,38 @@ class InferenceTerminalModel extends ChangeNotifier {
   /// 当前已输出的 Token 总数
   int get tokenCount => _tokenCount;
 
-  /// 当前推理已消耗的秒数
+  /// 当前推理已消耗的总秒数（从点击启动到当前的全部耗时，含加载与编码）
   double get elapsedSeconds => _elapsedSeconds;
+
+  /// 纯 Token 生成阶段已消耗的秒数（从模型吐出首个 Token 起统计）
+  double get generationElapsedSeconds => _generationElapsedSeconds;
+
+  /// 是否已经接收到首个 Token
+  bool get hasReceivedFirstToken => _hasReceivedFirstToken;
 
   /// 当前实况面板是否已有日志、Token 或处于活跃状态
   bool get hasContent =>
       _processLogs.isNotEmpty || _tokenBuffer.isNotEmpty || _isExtracting;
 
   /// 当前推理速度 (Tokens Per Second)
-  double get tokenSpeed =>
-      _elapsedSeconds > 0 ? (_tokenCount / _elapsedSeconds) : 0.0;
+  ///
+  /// 严格从模型吐出首个字（First Token）开始统计，剔除模型加载、冷启动与 Prompt 编码等待时间，
+  /// 真实反映模型解码阶段 (Decode Generation Phase) 的实际推理生成速率。
+  double get tokenSpeed {
+    if (!_hasReceivedFirstToken || _tokenCount <= 0 || _generationElapsedSeconds <= 0) {
+      return 0.0;
+    }
+    // 刚吐出前 1-2 个 token 且耗时极短 (<0.05s) 时避免瞬时除数极小导致的极端数字跳变
+    if (_generationElapsedSeconds < 0.05 && _tokenCount <= 2) {
+      return 0.0;
+    }
+    return _tokenCount / _generationElapsedSeconds;
+  }
 
   /// 格式化后的 Token 生成速率字符串（如 "18.5"）
   String get tokenSpeedFormatted => tokenSpeed.toStringAsFixed(1);
 
-  /// 格式化后的耗时秒数字符串（如 "2.4"）
+  /// 格式化后的总耗时秒数字符串（如 "2.4"）
   String get elapsedSecondsFormatted => _elapsedSeconds.toStringAsFixed(1);
 
   /// 终端全部内容（供一键复制使用：若有流式 Token 则返回 Token，否则返回日志全文）
@@ -64,22 +84,38 @@ class InferenceTerminalModel extends ChangeNotifier {
     return '$h:$m:$s.$ms';
   }
 
-  /// 启动一次新的推理会话：重置状态、重置秒表并开启高频 (100ms) 耗时计时器
+  /// 确保生成阶段秒表在接收到首个 Token 时立即启动
+  void _startGenerationTimerIfNeeded() {
+    if (!_hasReceivedFirstToken) {
+      _hasReceivedFirstToken = true;
+      _generationStopwatch = Stopwatch()..start();
+    }
+  }
+
+  /// 启动一次新的推理会话：重置状态、重置秒表并开启高频 (50ms) 耗时计时器
   void start({String? initialLog}) {
     _ticker?.cancel();
     _stopwatch?.stop();
+    _generationStopwatch?.stop();
 
     _isExtracting = true;
     _processLogs.clear();
     _tokenBuffer.clear();
     _tokenCount = 0;
     _elapsedSeconds = 0.0;
+    _generationElapsedSeconds = 0.0;
+    _hasReceivedFirstToken = false;
 
     _stopwatch = Stopwatch()..start();
-    _ticker = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    _generationStopwatch = null;
+
+    _ticker = Timer.periodic(const Duration(milliseconds: 50), (_) {
       if (_isExtracting) {
-        _elapsedSeconds =
-            (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+        _elapsedSeconds = (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+        if (_hasReceivedFirstToken && _generationStopwatch != null) {
+          _generationElapsedSeconds =
+              _generationStopwatch!.elapsedMilliseconds / 1000.0;
+        }
         notifyListeners();
       }
     });
@@ -105,6 +141,7 @@ class InferenceTerminalModel extends ChangeNotifier {
 
   /// 收到单个增量 Token 并追加至流式缓冲区
   void appendToken(String token, {int? tokenCount}) {
+    _startGenerationTimerIfNeeded();
     _tokenBuffer.write(token);
     if (tokenCount != null) {
       _tokenCount = tokenCount;
@@ -125,10 +162,14 @@ class InferenceTerminalModel extends ChangeNotifier {
       changed = true;
     }
     if (token != null) {
+      _startGenerationTimerIfNeeded();
       _tokenBuffer.write(token);
       changed = true;
     }
     if (tokenCount != null) {
+      if (tokenCount > 0) {
+        _startGenerationTimerIfNeeded();
+      }
       _tokenCount = tokenCount;
       changed = true;
     }
@@ -150,8 +191,12 @@ class InferenceTerminalModel extends ChangeNotifier {
     _ticker?.cancel();
     _ticker = null;
     _stopwatch?.stop();
-    _elapsedSeconds =
-        (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+    _generationStopwatch?.stop();
+    _elapsedSeconds = (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+    if (_hasReceivedFirstToken && _generationStopwatch != null) {
+      _generationElapsedSeconds =
+          _generationStopwatch!.elapsedMilliseconds / 1000.0;
+    }
     _isExtracting = false;
 
     if (completionLog != null && completionLog.isNotEmpty) {
@@ -166,8 +211,12 @@ class InferenceTerminalModel extends ChangeNotifier {
     _ticker?.cancel();
     _ticker = null;
     _stopwatch?.stop();
-    _elapsedSeconds =
-        (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+    _generationStopwatch?.stop();
+    _elapsedSeconds = (_stopwatch?.elapsedMilliseconds ?? 0) / 1000.0;
+    if (_hasReceivedFirstToken && _generationStopwatch != null) {
+      _generationElapsedSeconds =
+          _generationStopwatch!.elapsedMilliseconds / 1000.0;
+    }
     _isExtracting = false;
 
     addLog('$prefix $error');
@@ -178,11 +227,14 @@ class InferenceTerminalModel extends ChangeNotifier {
     _ticker?.cancel();
     _ticker = null;
     _stopwatch?.stop();
+    _generationStopwatch?.stop();
     _isExtracting = false;
     _processLogs.clear();
     _tokenBuffer.clear();
     _tokenCount = 0;
     _elapsedSeconds = 0.0;
+    _generationElapsedSeconds = 0.0;
+    _hasReceivedFirstToken = false;
     notifyListeners();
   }
 
@@ -191,6 +243,7 @@ class InferenceTerminalModel extends ChangeNotifier {
     _ticker?.cancel();
     _ticker = null;
     _stopwatch?.stop();
+    _generationStopwatch?.stop();
     super.dispose();
   }
 }

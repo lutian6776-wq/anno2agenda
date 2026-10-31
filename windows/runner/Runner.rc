@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.anno2agenda" "\0"
-            VALUE "FileDescription", "anno2agenda" "\0"
+            VALUE "CompanyName", "MeetSync" "\0"
+            VALUE "FileDescription", "知程 (MeetSync)" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "anno2agenda" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.anno2agenda. All rights reserved." "\0"
-            VALUE "OriginalFilename", "anno2agenda.exe" "\0"
-            VALUE "ProductName", "anno2agenda" "\0"
+            VALUE "InternalName", "MeetSync" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 MeetSync. All rights reserved." "\0"
+            VALUE "OriginalFilename", "MeetSync.exe" "\0"
+            VALUE "ProductName", "知程 (MeetSync)" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

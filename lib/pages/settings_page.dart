@@ -3,12 +3,14 @@ import 'package:flutter/material.dart';
 import '../repositories/agenda_repository.dart';
 import '../services/ai_extractor_service.dart';
 import '../services/app_settings_service.dart';
-import '../services/calendar_sync_service.dart';
 import '../services/floating_overlay_service.dart';
 import '../services/lan_sync_service.dart';
 import '../services/local_model_manager.dart';
 import '../services/theme_manager.dart' hide AppTheme;
 import '../theme/app_theme.dart';
+import '../widgets/app_toast.dart';
+import '../widgets/calendar_sync_dialog.dart';
+import '../widgets/model_center_dialog.dart';
 import 'prompt_testing_page.dart';
 
 /// 「设置」页面（大模型常驻、Android 原生无障碍悬浮窗、局域网协同与关于）
@@ -18,7 +20,7 @@ class SettingsPage extends StatefulWidget {
   final String engineIndicatorDetail;
   final VoidCallback onPreloadModel;
   final VoidCallback onUnloadModel;
-  final VoidCallback onOpenModelCenter;
+  final VoidCallback? onOpenModelCenter;
   final List<String> localIps;
   final TextEditingController peerIpController;
   final VoidCallback onStateRefreshed;
@@ -30,7 +32,7 @@ class SettingsPage extends StatefulWidget {
     required this.engineIndicatorDetail,
     required this.onPreloadModel,
     required this.onUnloadModel,
-    required this.onOpenModelCenter,
+    this.onOpenModelCenter,
     required this.localIps,
     required this.peerIpController,
     required this.onStateRefreshed,
@@ -98,14 +100,19 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey _advancedKey = GlobalKey();
   final GlobalKey _aboutKey = GlobalKey();
 
-  // 模型参数锚点 GlobalKey，用于移动端抽屉升起时背景定位
+  // 抽屉与参数锚点 GlobalKey，用于桌面/移动端背景定位
+  final GlobalKey _paramModelManagerKey = GlobalKey();
+  final GlobalKey _paramIdleUnloadKey = GlobalKey();
+  final GlobalKey _paramEngineModeKey = GlobalKey();
+  final GlobalKey _paramCalendarSyncKey = GlobalKey();
   final GlobalKey _paramContextSizeKey = GlobalKey();
   final GlobalKey _paramMaxTokensKey = GlobalKey();
   final GlobalKey _paramTemperatureKey = GlobalKey();
   final GlobalKey _paramTopPKey = GlobalKey();
   final GlobalKey _paramRepeatPenaltyKey = GlobalKey();
 
-  // 当前正在通过 Drawer 调节的参数配置与临时值
+  // 当前激活的抽屉标识（可以是参数 title、'modelManager'、'idleUnload'、'engineMode' 或 'calendarSync'）
+  String? _activeDrawerId;
   _ModelParamConfig? _activeParamConfig;
   double _tempParamValue = 0.0;
   final TextEditingController _paramTextController = TextEditingController();
@@ -113,6 +120,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final ScrollController _scrollController = ScrollController();
   int _activeNavIndex = 0;
   bool _isAutoScrolling = false;
+  bool _isWide = false;
 
   @override
   void initState() {
@@ -133,21 +141,22 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  void _closeParamDrawer() {
+  void _closeDrawer() {
     if (mounted) {
       setState(() {
+        _activeDrawerId = null;
         _activeParamConfig = null;
       });
     }
   }
 
   void _handleParamEdit(_ModelParamConfig config) {
-    if (_activeParamConfig?.title == config.title) {
-      _closeParamDrawer();
+    if (_activeDrawerId == config.title) {
+      _closeDrawer();
       return;
     }
 
-    final isWide = MediaQuery.of(context).size.width >= 880;
+    final isWide = _isWide;
     if (isWide) {
       _openDesktopParameterDrawer(config);
     } else {
@@ -157,6 +166,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void _openDesktopParameterDrawer(_ModelParamConfig config) {
     setState(() {
+      _activeDrawerId = config.title;
       _activeParamConfig = config;
       _tempParamValue = config.currentValue.clamp(config.min, config.max);
       _paramTextController.text = config.isInteger
@@ -185,6 +195,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
 
     setState(() {
+      _activeDrawerId = config.title;
       _activeParamConfig = config;
       _tempParamValue = config.currentValue.clamp(config.min, config.max);
       _paramTextController.text = config.isInteger
@@ -202,7 +213,7 @@ class _SettingsPageState extends State<SettingsPage> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return _buildMobileBottomSheetContent(
+        return _buildMobileParamBottomSheet(
           ctx,
           config,
           primaryColor,
@@ -212,8 +223,84 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (mounted) {
       setState(() {
+        _activeDrawerId = null;
         _activeParamConfig = null;
       });
+    }
+  }
+
+  /// 通用自定义选项抽屉打开（空闲内存回收、推理路线等）
+  void _openCustomOptionDrawer({
+    required String drawerId,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    GlobalKey? anchorKey,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setDrawerState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) async {
+    if (_activeDrawerId == drawerId) {
+      _closeDrawer();
+      return;
+    }
+
+    final isWide = _isWide;
+    if (isWide) {
+      setState(() {
+        _activeDrawerId = drawerId;
+        _activeParamConfig = null;
+      });
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+          alignment: 0.25,
+        );
+      }
+    } else {
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          alignment: 0.12,
+        );
+      }
+      setState(() {
+        _activeDrawerId = drawerId;
+        _activeParamConfig = null;
+      });
+
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted) return;
+
+      final primaryColor = context.colorScheme.primary;
+
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          return _buildMobileCustomBottomSheet(
+            ctx,
+            title: title,
+            subtitle: subtitle,
+            icon: icon,
+            primaryColor: primaryColor,
+            formBuilder: formBuilder,
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _activeDrawerId = null;
+        });
+      }
     }
   }
 
@@ -331,9 +418,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void _showSnack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-    );
+    AppToast.show(context, msg);
   }
 
   void _toggleInfo(String key) {
@@ -511,6 +596,106 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  /// 统一的紧凑参数/选项微调项（带统一左侧图标、标题副标题、圆角矩形 Badge、选中展开行变色与全行热区点击）
+  Widget _buildCompactParamTile({
+    Key? key,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    String? valueBadge,
+    Widget? badgeWidget,
+    required VoidCallback onTap,
+    bool isEditing = false,
+  }) {
+    final appColors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
+
+    return InkWell(
+      key: key,
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        color: isEditing
+            ? primaryColor.withValues(alpha: 0.08)
+            : Colors.transparent,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 20,
+              color: isEditing ? primaryColor : primaryColor,
+            ),
+            const SizedBox(width: 12),
+            // 左侧说明区（主标题带中英文对照，副标题单行简述默认值）
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      color: isEditing ? primaryColor : appColors.textPrimary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: isEditing
+                          ? primaryColor.withValues(alpha: 0.8)
+                          : appColors.textSecondary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            // 右侧展示区：圆角矩形 Badge（等宽代码字体或自定义 Badge 状态组件）
+            if (badgeWidget != null)
+              badgeWidget
+            else if (valueBadge != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isEditing
+                      ? primaryColor.withValues(alpha: 0.16)
+                      : appColors.surfaceLow,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: isEditing ? primaryColor : appColors.borderSubtle,
+                    width: 0.8,
+                  ),
+                ),
+                child: Text(
+                  valueBadge,
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.bold,
+                    color: isEditing ? primaryColor : appColors.textPrimary,
+                  ),
+                ),
+              ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.chevron_right,
+              size: 16,
+              color: isEditing ? primaryColor : appColors.textTertiary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ==========================================
   // 模块一：外观设置（单行收敛）
   // ==========================================
@@ -650,6 +835,9 @@ class _SettingsPageState extends State<SettingsPage> {
         widget.engineIndicatorDetail.contains('0延迟就绪');
     final isLoading = widget.engineIndicatorDetail.contains('正在') ||
         LocalModelManager.isModelLoading;
+    final statusColor = isLoaded
+        ? appColors.tagWork
+        : (isLoading ? appColors.tagStudy : appColors.textTertiary);
 
     // 状态文案
     String statusTitle;
@@ -668,25 +856,9 @@ class _SettingsPageState extends State<SettingsPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // 分组头部：标题简洁为“端侧引擎”，右侧放置按钮“模型管家”
+        // 分组头部：标题简洁为“端侧引擎”
         _buildSectionHeader(
           title: '端侧引擎',
-          trailing: TextButton.icon(
-            onPressed: widget.onOpenModelCenter,
-            icon: Icon(Icons.tune_rounded, size: 15, color: primaryColor),
-            label: Text(
-              '模型管家',
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-                color: primaryColor,
-              ),
-            ),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            ),
-          ),
           infoKey: 'modelOverviewGuide',
           tooltip: '查看端侧引擎说明',
         ),
@@ -698,32 +870,99 @@ class _SettingsPageState extends State<SettingsPage> {
 
         _buildGroupContainer(
           children: [
-            // 1. 引擎状态与操作（单行聚合）
+            // 1. 模型管家（端侧引擎第一行，抽屉/Sheet展示，统一 Badge 与选中高亮）
+            _buildCompactParamTile(
+              key: _paramModelManagerKey,
+              icon: Icons.tune_rounded,
+              title: '模型管家',
+              subtitle: '管理本地已下载模型权重，或在线下载推荐开源大模型',
+              valueBadge: _getModelManagerBadge(),
+              isEditing: _activeDrawerId == 'modelManager',
+              onTap: () {
+                widget.onOpenModelCenter?.call();
+                _openCustomOptionDrawer(
+                  drawerId: 'modelManager',
+                  title: '端侧模型管家',
+                  subtitle: '管理本地离线模型与在线极速下载',
+                  icon: Icons.tune_rounded,
+                  anchorKey: _paramModelManagerKey,
+                  formBuilder: (ctx, setDrawerState, onClose) {
+                    return ModelCenterView(
+                      onRefreshState: () async {
+                        widget.onStateRefreshed();
+                      },
+                      onSelectModel: (model) {
+                        widget.onStateRefreshed();
+                        setState(() {});
+                      },
+                      onEngineModeChanged: (mode) {
+                        widget.onEngineModeChanged(mode);
+                        widget.onStateRefreshed();
+                        setState(() {});
+                      },
+                      onShowSnack: _showSnack,
+                      onClose: onClose,
+                    );
+                  },
+                );
+              },
+            ),
+            _buildDivider(),
+
+            // 2. 引擎状态与操作（单行聚合）
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
-                  // 绿色状态呼吸灯
-                  Container(
-                    width: 9,
-                    height: 9,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: isLoaded
-                          ? appColors.tagWork
-                          : (isLoading ? appColors.tagStudy : appColors.textTertiary),
-                      boxShadow: isLoaded
-                          ? [
-                              BoxShadow(
-                                color: appColors.tagWork.withValues(alpha: 0.5),
-                                blurRadius: 5,
-                                spreadRadius: 1,
-                              ),
-                            ]
-                          : null,
+                  // 引擎状态指示环（环形呼吸灯直接包裹图标，与各行严格对齐）
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: Center(
+                      child: OverflowBox(
+                        maxWidth: 24,
+                        maxHeight: 24,
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: statusColor.withValues(
+                              alpha: isLoaded ? 0.14 : (isLoading ? 0.12 : 0.06),
+                            ),
+                            border: Border.all(
+                              color: statusColor,
+                              width: 1.6,
+                            ),
+                            boxShadow: isLoaded
+                                ? [
+                                    BoxShadow(
+                                      color: statusColor.withValues(alpha: 0.45),
+                                      blurRadius: 6,
+                                      spreadRadius: 1,
+                                    ),
+                                  ]
+                                : (isLoading
+                                    ? [
+                                        BoxShadow(
+                                          color: statusColor.withValues(alpha: 0.35),
+                                          blurRadius: 4,
+                                          spreadRadius: 0.5,
+                                        ),
+                                      ]
+                                    : null),
+                          ),
+                          child: Icon(
+                            Icons.memory,
+                            size: 13,
+                            color: statusColor,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 12),
                   // 文案区（使用 Expanded 确保不截断）
                   Expanded(
                     child: Column(
@@ -795,11 +1034,14 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             _buildDivider(),
 
-            // 2. 深度思考开关（单行 Switch 列表项）
+            // 3. 深度思考开关（单行 Switch 列表项，带统一左侧图标）
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
                 children: [
+                  Icon(Icons.psychology_outlined,
+                      color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -840,60 +1082,33 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             _buildDivider(),
 
-            // 3. 常驻策略选择（单行列表项，点击唤起底部 Picker）
-            InkWell(
-              onTap: () => _showIdleUnloadPicker(context),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '空闲内存回收',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: appColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '无提取任务后自动解除大模型内存占用',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              color: appColors.textSecondary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _getIdleMinutesText(LocalModelManager.idleUnloadMinutes),
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: appColors.textSecondary,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: appColors.textTertiary,
-                    ),
-                  ],
-                ),
-              ),
+            // 4. 常驻策略选择（统一抽屉与圆角矩形 Badge，整行可点击触发，选中展开行变色）
+            _buildCompactParamTile(
+              key: _paramIdleUnloadKey,
+              icon: Icons.timer_outlined,
+              title: '空闲内存回收',
+              subtitle: '无提取任务后自动解除大模型内存占用',
+              valueBadge: _getIdleMinutesText(LocalModelManager.idleUnloadMinutes),
+              isEditing: _activeDrawerId == 'idleUnload',
+              onTap: () {
+                _openCustomOptionDrawer(
+                  drawerId: 'idleUnload',
+                  title: '空闲内存回收策略',
+                  subtitle: '设置模型在无任务时的显存自动回收策略',
+                  icon: Icons.timer_outlined,
+                  anchorKey: _paramIdleUnloadKey,
+                  formBuilder: (ctx, setDrawerState, onClose) {
+                    return _buildIdleUnloadForm(
+                      primaryColor: primaryColor,
+                      updateState: setDrawerState,
+                      onClose: onClose,
+                    );
+                  },
+                );
+              },
             ),
 
-            // 4. Android 专属：展开悬浮窗时自动预热
+            // 5. Android 专属：展开悬浮窗时自动预热
             if (Platform.isAndroid) ...[
               _buildDivider(),
               Padding(
@@ -901,6 +1116,9 @@ class _SettingsPageState extends State<SettingsPage> {
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 child: Row(
                   children: [
+                    Icon(Icons.flash_on_outlined,
+                        color: primaryColor, size: 20),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -942,62 +1160,115 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
 
             _buildDivider(),
-            // 5. 推理路线切换（单行列表项）
-            InkWell(
-              onTap: () => _showEngineModePicker(context),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '推理路线与兜底策略',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: appColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            _getEngineModeText(widget.engineMode),
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              color: appColors.textSecondary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _getEngineModeShortName(widget.engineMode),
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: appColors.textSecondary,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 16,
-                      color: appColors.textTertiary,
-                    ),
-                  ],
-                ),
-              ),
+            // 6. 推理路线切换（统一抽屉与圆角矩形 Badge，整行可点击触发，选中展开行变色）
+            _buildCompactParamTile(
+              key: _paramEngineModeKey,
+              icon: Icons.alt_route_rounded,
+              title: '推理路线与兜底策略',
+              subtitle: _getEngineModeText(widget.engineMode),
+              valueBadge: _getEngineModeShortName(widget.engineMode),
+              isEditing: _activeDrawerId == 'engineMode',
+              onTap: () {
+                _openCustomOptionDrawer(
+                  drawerId: 'engineMode',
+                  title: '推理路线与兜底策略',
+                  subtitle: '选择日程提取时的 AI 推理模式与兜底机制',
+                  icon: Icons.alt_route_rounded,
+                  anchorKey: _paramEngineModeKey,
+                  formBuilder: (ctx, setDrawerState, onClose) {
+                    return _buildEngineModeForm(
+                      primaryColor: primaryColor,
+                      updateState: setDrawerState,
+                      onClose: onClose,
+                    );
+                  },
+                );
+              },
             ),
           ],
         ),
       ],
     );
+  }
+
+  String _getModelManagerBadge() {
+    final loaded = LocalModelManager.currentlyLoadedModelId;
+    if (loaded != null && loaded.isNotEmpty) {
+      if (loaded.contains('0.5B') || loaded.contains('0.5b')) {
+        return 'Qwen-0.5B';
+      } else if (loaded.contains('1.5B') || loaded.contains('1.5b')) {
+        return 'Qwen-1.5B';
+      } else if (loaded.contains('3B') || loaded.contains('3b')) {
+        return 'Llama-3B';
+      }
+      return '已挂载';
+    }
+    return '模型库';
+  }
+
+  Widget _buildCalendarSyncBadge(AppCustomColors appColors) {
+    final allEvents = AgendaRepository.instance.allEvents;
+    final syncedCount = allEvents.where((e) => e.syncedToSystemCalendar).length;
+    final unsyncedCount = allEvents.length - syncedCount;
+    final isAllSynced = unsyncedCount <= 0;
+    final isEditing = _activeDrawerId == 'calendarSync';
+
+    if (isAllSynced) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: appColors.tagWork.withValues(alpha: isEditing ? 0.22 : 0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: appColors.tagWork.withValues(alpha: 0.5),
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check, size: 14, color: appColors.tagWork),
+            const SizedBox(width: 3),
+            Text(
+              '已同步',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: appColors.tagWork,
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      final errorColor = context.colorScheme.error;
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: errorColor.withValues(alpha: isEditing ? 0.22 : 0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: errorColor.withValues(alpha: 0.5),
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '$unsyncedCount 未同步',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: errorColor,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   String _getIdleMinutesText(int minutes) {
@@ -1021,197 +1292,325 @@ class _SettingsPageState extends State<SettingsPage> {
     };
   }
 
-  void _showIdleUnloadPicker(BuildContext context) {
-    final appColors = context.appColors;
-    final primaryColor = context.colorScheme.primary;
+  /// 构建空闲内存回收抽屉/Sheet表单
+  Widget _buildIdleUnloadForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    final colors = context.appColors;
     final current = LocalModelManager.idleUnloadMinutes;
 
     final options = [
       {'title': '1 分钟', 'subtitle': '极速防杀，省电低功耗', 'val': 1},
-      {'title': '3 分钟', 'subtitle': '快速回收显存', 'val': 3},
-      {'title': '5 分钟', 'subtitle': '默认推荐，平衡体验与功耗', 'val': 5},
-      {'title': '10 分钟', 'subtitle': '较长常驻，减少频繁冷启动', 'val': 10},
-      {'title': '永不回收', 'subtitle': '持续常驻内存/显存', 'val': -1},
+      {'title': '3 分钟', 'subtitle': '快速回收显存，适合频繁切换应用', 'val': 3},
+      {'title': '5 分钟 (默认推荐)', 'subtitle': '平衡日常解析体验与后台能耗', 'val': 5},
+      {'title': '10 分钟', 'subtitle': '较长常驻，减少频繁冷启动等待', 'val': 10},
+      {'title': '永不回收 (持续常驻)', 'subtitle': '权重持续驻留内存 / 显存', 'val': -1},
     ];
 
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: appColors.surfaceModal,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        '空闲内存回收策略',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: appColors.textPrimary,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 20),
-                        onPressed: () => Navigator.pop(ctx),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 1. 说明卡片
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.borderSubtle),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(Icons.info_outline, size: 16, color: primaryColor),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '无提取任务达到指定时长后，自动解除大模型在 RAM / 显存中的常驻占用，防止移动端系统杀后台，在待机功耗与解析响应速度之间取得最佳平衡。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: colors.textSecondary,
+                    height: 1.45,
                   ),
                 ),
-                Divider(
-                    height: 1, thickness: 0.5, color: appColors.borderSubtle),
-                ...options.map((opt) {
-                  final isSelected = opt['val'] == current;
-                  return ListTile(
-                    title: Text(
-                      opt['title'] as String,
-                      style: TextStyle(
-                        fontSize: 14.5,
-                        fontWeight:
-                            isSelected ? FontWeight.bold : FontWeight.normal,
-                        color: isSelected ? primaryColor : appColors.textPrimary,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // 2. 选项列表
+        ...options.map((opt) {
+          final val = opt['val'] as int;
+          final isSelected = val == current;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: InkWell(
+              onTap: () {
+                updateState(() {
+                  LocalModelManager.idleUnloadMinutes = val;
+                  LocalModelManager.markActivity();
+                });
+                AppSettingsService.instance.setIdleUnloadMinutes(val);
+                if (mounted) setState(() {});
+                _showSnack(val > 0
+                    ? '已设置为无任务 $val 分钟后自动释放内存'
+                    : '已设置为永不自动释放');
+                onClose();
+              },
+              borderRadius: BorderRadius.circular(10),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? primaryColor.withValues(alpha: 0.10)
+                      : colors.surfaceLow,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isSelected ? primaryColor : colors.borderSubtle,
+                    width: isSelected ? 1.5 : 1.0,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      size: 18,
+                      color: isSelected ? primaryColor : colors.textTertiary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            opt['title'] as String,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight:
+                                  isSelected ? FontWeight.bold : FontWeight.w600,
+                              color: isSelected
+                                  ? primaryColor
+                                  : colors.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            opt['subtitle'] as String,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    subtitle: Text(
-                      opt['subtitle'] as String,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: appColors.textSecondary,
-                      ),
-                    ),
-                    trailing: isSelected
-                        ? Icon(Icons.check_circle_rounded,
-                            color: primaryColor, size: 20)
-                        : null,
-                    onTap: () {
-                      final val = opt['val'] as int;
-                      setState(() {
-                        LocalModelManager.idleUnloadMinutes = val;
-                        LocalModelManager.markActivity();
-                      });
-                      AppSettingsService.instance.setIdleUnloadMinutes(val);
-                      Navigator.pop(ctx);
-                      _showSnack(val > 0
-                          ? '已设置为无任务 $val 分钟后自动释放内存'
-                          : '已设置为永不自动释放');
-                    },
-                  );
-                }),
-              ],
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
+        const SizedBox(height: 16),
+
+        // 3. 完成按钮
+        FilledButton(
+          onPressed: onClose,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
             ),
           ),
-        );
-      },
+          child: const Text('完成'),
+        ),
+      ],
     );
   }
 
-  void _showEngineModePicker(BuildContext context) {
-    final appColors = context.appColors;
-    final primaryColor = context.colorScheme.primary;
+  /// 构建推理路线抽屉/Sheet表单
+  Widget _buildEngineModeForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    final colors = context.appColors;
 
     final options = [
       {
         'mode': AIEngineMode.hybridAuto,
         'title': '混合自动 (推荐)',
         'subtitle': '优先使用端侧大模型提取，模型未就绪或解析异常时自动由 0 延迟极速规则引擎兜底',
+        'tag': '智能 + 兜底',
       },
       {
         'mode': AIEngineMode.builtInRuleEngine,
         'title': '纯端侧极速规则',
         'subtitle': '0 延迟、0 显存开销，使用启发式中文时空正则匹配，完全不占显存与电量',
+        'tag': '0内存 · 极速',
       },
       {
         'mode': AIEngineMode.localLlmServer,
         'title': '强制端侧大模型',
         'subtitle': '仅使用本地或局域网 LLM 推理，不启用正则引擎兜底',
+        'tag': '纯大模型',
       },
     ];
 
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: appColors.surfaceModal,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        '推理路线与兜底策略',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: appColors.textPrimary,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 20),
-                        onPressed: () => Navigator.pop(ctx),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 1. 说明卡片
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.borderSubtle),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(Icons.info_outline, size: 16, color: primaryColor),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '知程支持端侧大模型与启发式正则双引擎。推荐使用“混合自动”模式，在保证深度语义理解的同时获得高可用秒级保底。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: colors.textSecondary,
+                    height: 1.45,
                   ),
                 ),
-                Divider(
-                    height: 1, thickness: 0.5, color: appColors.borderSubtle),
-                ...options.map((opt) {
-                  final mode = opt['mode'] as AIEngineMode;
-                  final isSelected = widget.engineMode == mode;
-                  return ListTile(
-                    title: Text(
-                      opt['title'] as String,
-                      style: TextStyle(
-                        fontSize: 14.5,
-                        fontWeight:
-                            isSelected ? FontWeight.bold : FontWeight.normal,
-                        color: isSelected ? primaryColor : appColors.textPrimary,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // 2. 选项列表
+        ...options.map((opt) {
+          final mode = opt['mode'] as AIEngineMode;
+          final isSelected = widget.engineMode == mode;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: InkWell(
+              onTap: () {
+                updateState(() {
+                  widget.onEngineModeChanged(mode);
+                });
+                if (mounted) setState(() {});
+                onClose();
+              },
+              borderRadius: BorderRadius.circular(10),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? primaryColor.withValues(alpha: 0.10)
+                      : colors.surfaceLow,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isSelected ? primaryColor : colors.borderSubtle,
+                    width: isSelected ? 1.5 : 1.0,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      size: 18,
+                      color: isSelected ? primaryColor : colors.textTertiary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                opt['title'] as String,
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: isSelected
+                                      ? FontWeight.bold
+                                      : FontWeight.w600,
+                                  color: isSelected
+                                      ? primaryColor
+                                      : colors.textPrimary,
+                                ),
+                              ),
+                              const Spacer(),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isSelected
+                                      ? primaryColor.withValues(alpha: 0.18)
+                                      : colors.borderSubtle
+                                          .withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  opt['tag'] as String,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.bold,
+                                    color: isSelected
+                                        ? primaryColor
+                                        : colors.textSecondary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            opt['subtitle'] as String,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    subtitle: Text(
-                      opt['subtitle'] as String,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: appColors.textSecondary,
-                      ),
-                    ),
-                    trailing: isSelected
-                        ? Icon(Icons.check_circle_rounded,
-                            color: primaryColor, size: 20)
-                        : null,
-                    onTap: () {
-                      widget.onEngineModeChanged(mode);
-                      Navigator.pop(ctx);
-                    },
-                  );
-                }),
-              ],
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
+        const SizedBox(height: 16),
+
+        // 3. 完成按钮
+        FilledButton(
+          onPressed: onClose,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
             ),
           ),
-        );
-      },
+          child: const Text('完成'),
+        ),
+      ],
     );
   }
 
@@ -1297,10 +1696,11 @@ class _SettingsPageState extends State<SettingsPage> {
             // 2. 上下文窗口 (Context Size)
             _buildCompactParamTile(
               key: _paramContextSizeKey,
+              icon: Icons.view_agenda_outlined,
               title: '上下文窗口 (Context Size)',
-              subtitle: '最大 Token 容量 · 默认 4096',
+              subtitle: '最大 Token 容量 · 默认 2048',
               valueBadge: '${LocalModelManager.contextSize}',
-              isEditing: _activeParamConfig?.title == '上下文窗口大小 (Context Size)',
+              isEditing: _activeDrawerId == '上下文窗口大小 (Context Size)',
               onTap: () => _handleParamEdit(
                 _ModelParamConfig(
                   title: '上下文窗口大小 (Context Size)',
@@ -1328,10 +1728,11 @@ class _SettingsPageState extends State<SettingsPage> {
             // 3. 思考 Token 上限 (Max Tokens)
             _buildCompactParamTile(
               key: _paramMaxTokensKey,
+              icon: Icons.hourglass_bottom_outlined,
               title: '思考 Token 上限 (Max Tokens)',
-              subtitle: '深度思考最大预算 · 默认 1024',
+              subtitle: '深度思考最大预算 · 默认 1536',
               valueBadge: '${LocalModelManager.maxThinkingTokens}',
-              isEditing: _activeParamConfig?.title == '思考与生成 Token 上限 (Max Tokens)',
+              isEditing: _activeDrawerId == '思考与生成 Token 上限 (Max Tokens)',
               onTap: () => _handleParamEdit(
                 _ModelParamConfig(
                   title: '思考与生成 Token 上限 (Max Tokens)',
@@ -1360,10 +1761,11 @@ class _SettingsPageState extends State<SettingsPage> {
             // 4. 采样温度 (Temperature)
             _buildCompactParamTile(
               key: _paramTemperatureKey,
+              icon: Icons.device_thermostat_outlined,
               title: '采样温度 (Temperature)',
-              subtitle: '输出随机度，越低越严谨 · 默认 0.10',
+              subtitle: '输出随机度，越低越严谨 · 默认 0.30',
               valueBadge: LocalModelManager.temperature.toStringAsFixed(2),
-              isEditing: _activeParamConfig?.title == '采样温度 (Temperature)',
+              isEditing: _activeDrawerId == '采样温度 (Temperature)',
               onTap: () => _handleParamEdit(
                 _ModelParamConfig(
                   title: '采样温度 (Temperature)',
@@ -1388,22 +1790,23 @@ class _SettingsPageState extends State<SettingsPage> {
             // 5. 核采样阈值 (Top-P)
             _buildCompactParamTile(
               key: _paramTopPKey,
+              icon: Icons.filter_alt_outlined,
               title: '核采样阈值 (Top-P)',
-              subtitle: '候选词概率截断门限 · 默认 0.85',
+              subtitle: '候选词概率截断门限 · 默认 0.90',
               valueBadge: LocalModelManager.topP.toStringAsFixed(2),
-              isEditing: _activeParamConfig?.title == '核采样阈值 (Top-P)',
+              isEditing: _activeDrawerId == '核采样阈值 (Top-P)',
               onTap: () => _handleParamEdit(
                 _ModelParamConfig(
                   title: '核采样阈值 (Top-P)',
                   description:
-                      '仅从累积概率达到此阈值的最高概率候选词中采样。0.85 兼顾了高确定性与常用词丰富度。',
+                      '仅从累积概率达到此阈值的最高概率候选词中采样。0.90 兼顾了高确定性与常用词丰富度。',
                   unit: '',
                   currentValue: LocalModelManager.topP,
                   min: AppSettingsService.minTopP,
                   max: AppSettingsService.maxTopP,
                   divisions: 18, // 0.05 step
                   isInteger: false,
-                  presets: const [0.50, 0.70, 0.85, 0.95, 1.00],
+                  presets: const [0.50, 0.70, 0.85, 0.90, 0.95, 1.00],
                   anchorKey: _paramTopPKey,
                   onConfirm: (val) async {
                     await AppSettingsService.instance.setTopP(val);
@@ -1416,10 +1819,11 @@ class _SettingsPageState extends State<SettingsPage> {
             // 6. 重复词惩罚 (Repeat Penalty)
             _buildCompactParamTile(
               key: _paramRepeatPenaltyKey,
+              icon: Icons.replay_rounded,
               title: '重复词惩罚 (Repeat Penalty)',
-              subtitle: '抑制自言自语死循环 · 默认 1.05',
+              subtitle: '抑制自言自语死循环 · 默认 1.10',
               valueBadge: LocalModelManager.repeatPenalty.toStringAsFixed(2),
-              isEditing: _activeParamConfig?.title == '重复词惩罚 (Repeat Penalty)',
+              isEditing: _activeDrawerId == '重复词惩罚 (Repeat Penalty)',
               onTap: () => _handleParamEdit(
                 _ModelParamConfig(
                   title: '重复词惩罚 (Repeat Penalty)',
@@ -1469,93 +1873,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 紧凑参数微调项（消除重复“调节”按钮，整行作为可点击热区）
-  Widget _buildCompactParamTile({
-    Key? key,
-    required String title,
-    required String subtitle,
-    required String valueBadge,
-    required VoidCallback onTap,
-    bool isEditing = false,
-  }) {
-    final appColors = context.appColors;
-    final primaryColor = context.colorScheme.primary;
-
-    return InkWell(
-      key: key,
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        color: isEditing
-            ? primaryColor.withValues(alpha: 0.08)
-            : Colors.transparent,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
-        child: Row(
-          children: [
-            // 左侧说明区（主标题带中英文对照，副标题单行简述默认值）
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w600,
-                      color: isEditing ? primaryColor : appColors.textPrimary,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: appColors.textSecondary,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            // 右侧展示区：数值徽章（等宽代码字体）
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: isEditing
-                    ? primaryColor.withValues(alpha: 0.16)
-                    : appColors.surfaceLow,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(
-                  color: isEditing ? primaryColor : appColors.borderSubtle,
-                  width: 0.8,
-                ),
-              ),
-              child: Text(
-                valueBadge,
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.bold,
-                  color: isEditing ? primaryColor : appColors.textPrimary,
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(
-              Icons.chevron_right,
-              size: 16,
-              color: isEditing ? primaryColor : appColors.textTertiary,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _showResetConfirmDialog() {
     showDialog(
       context: context,
@@ -1572,9 +1889,7 @@ class _SettingsPageState extends State<SettingsPage> {
             onPressed: () async {
               Navigator.of(ctx).pop();
               await AppSettingsService.instance.resetModelParamsToDefault();
-              if (_activeParamConfig != null) {
-                _closeParamDrawer();
-              }
+              _closeDrawer();
               if (mounted) setState(() {});
               _showSnack('已重置所有推理与采样参数为默认值');
             },
@@ -1610,11 +1925,14 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         _buildGroupContainer(
           children: [
-            // 全局悬浮窗开关
+            // 全局悬浮窗开关（统一带左侧图标）
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
                 children: [
+                  Icon(Icons.bubble_chart_outlined,
+                      color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1657,11 +1975,14 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             _buildDivider(),
 
-            // 无障碍识屏服务
+            // 无障碍识屏服务（统一带左侧图标）
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
                 children: [
+                  Icon(Icons.accessibility_new_rounded,
+                      color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1759,6 +2080,9 @@ class _SettingsPageState extends State<SettingsPage> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
                 children: [
+                  Icon(Icons.auto_delete_outlined,
+                      color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1797,54 +2121,35 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             _buildDivider(),
-            InkWell(
-              onTap: () async {
-                final res =
-                    await CalendarSyncService.instance.performTwoWaySync();
-                if (!mounted) return;
-                _showSnack('🎉 ${res.summary}');
+            // 2. 打开同步中心（抽屉/Sheet展示，保留抽屉机制，带同步状态 Badge）
+            _buildCompactParamTile(
+              key: _paramCalendarSyncKey,
+              icon: Icons.sync,
+              title: '打开同步中心',
+              subtitle: '从底层系统日历导入日程并将本地新增日程推送入历',
+              badgeWidget: _buildCalendarSyncBadge(appColors),
+              isEditing: _activeDrawerId == 'calendarSync',
+              onTap: () {
+                _openCustomOptionDrawer(
+                  drawerId: 'calendarSync',
+                  title: '日历同步中心',
+                  subtitle: '系统日历双向推拉对齐与底层事件同步',
+                  icon: Icons.sync,
+                  anchorKey: _paramCalendarSyncKey,
+                  formBuilder: (ctx, setDrawerState, onClose) {
+                    return CalendarSyncPanel(
+                      showHeader: false,
+                      isDrawerMode: true,
+                      onClose: onClose,
+                      onSyncCompleted: () {
+                        setDrawerState(() {});
+                        setState(() {});
+                        widget.onStateRefreshed();
+                      },
+                    );
+                  },
+                );
               },
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Row(
-                  children: [
-                    Icon(Icons.sync, color: primaryColor, size: 20),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '立即执行双向同步',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: appColors.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '从底层系统日历导入日程并将本地新增日程推送入历',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              color: appColors.textSecondary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 18,
-                      color: appColors.textTertiary,
-                    ),
-                  ],
-                ),
-              ),
             ),
           ],
         ),
@@ -1915,6 +2220,8 @@ class _SettingsPageState extends State<SettingsPage> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
                 children: [
+                  Icon(Icons.lan_outlined, color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: TextField(
                       controller: widget.peerIpController,
@@ -2200,18 +2507,26 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '最小: ${config.isInteger ? config.min.round() : config.min.toStringAsFixed(2)} ${config.unit}',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: colors.textTertiary,
+              Flexible(
+                child: Text(
+                  '最小: ${config.isInteger ? config.min.round() : config.min.toStringAsFixed(2)} ${config.unit}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: colors.textTertiary,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Text(
-                '最大: ${config.isInteger ? config.max.round() : config.max.toStringAsFixed(2)} ${config.unit}',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: colors.textTertiary,
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  '最大: ${config.isInteger ? config.max.round() : config.max.toStringAsFixed(2)} ${config.unit}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: colors.textTertiary,
+                  ),
+                  textAlign: TextAlign.end,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
@@ -2318,12 +2633,81 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// 构建桌面端右侧滑出抽屉内容
   Widget _buildDesktopDrawerContent(
-    _ModelParamConfig config,
     Color primaryColor,
   ) {
     return StatefulBuilder(
       builder: (context, setDrawerState) {
         final colors = context.appColors;
+
+        String drawerTitle = '';
+        String drawerSubtitle = '';
+        IconData drawerIcon = Icons.tune;
+        Widget formContent = const SizedBox.shrink();
+
+        if (_activeParamConfig != null) {
+          drawerTitle = _activeParamConfig!.title;
+          drawerSubtitle = '调节推理参数并保存生效';
+          drawerIcon = Icons.tune;
+          formContent = _buildParamEditorForm(
+            config: _activeParamConfig!,
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'modelManager') {
+          drawerTitle = '端侧模型管家';
+          drawerSubtitle = '管理本地离线模型与在线极速下载';
+          drawerIcon = Icons.tune_rounded;
+          formContent = ModelCenterView(
+            onRefreshState: () async {
+              widget.onStateRefreshed();
+            },
+            onSelectModel: (model) {
+              widget.onStateRefreshed();
+              setState(() {});
+            },
+            onEngineModeChanged: (mode) {
+              widget.onEngineModeChanged(mode);
+              widget.onStateRefreshed();
+              setState(() {});
+            },
+            onShowSnack: _showSnack,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'idleUnload') {
+          drawerTitle = '空闲内存回收策略';
+          drawerSubtitle = '设置模型在无任务时的显存自动回收策略';
+          drawerIcon = Icons.timer_outlined;
+          formContent = _buildIdleUnloadForm(
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'engineMode') {
+          drawerTitle = '推理路线与兜底策略';
+          drawerSubtitle = '选择日程提取时的 AI 推理模式与兜底机制';
+          drawerIcon = Icons.alt_route_rounded;
+          formContent = _buildEngineModeForm(
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'calendarSync') {
+          drawerTitle = '日历同步中心';
+          drawerSubtitle = '系统日历双向推拉对齐与底层事件同步';
+          drawerIcon = Icons.sync;
+          formContent = CalendarSyncPanel(
+            showHeader: false,
+            isDrawerMode: true,
+            onClose: _closeDrawer,
+            onSyncCompleted: () {
+              setDrawerState(() {});
+              setState(() {});
+              widget.onStateRefreshed();
+            },
+          );
+        }
+
         return Container(
           width: 380,
           color: colors.surfaceModal,
@@ -2341,7 +2725,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         color: primaryColor.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Icon(Icons.tune, color: primaryColor, size: 18),
+                      child: Icon(drawerIcon, color: primaryColor, size: 18),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -2349,7 +2733,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            config.title,
+                            drawerTitle,
                             style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.bold,
@@ -2360,7 +2744,7 @@ class _SettingsPageState extends State<SettingsPage> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '调节推理参数并保存生效',
+                            drawerSubtitle,
                             style: TextStyle(
                               fontSize: 11,
                               color: colors.textSecondary,
@@ -2372,7 +2756,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     IconButton(
                       icon: const Icon(Icons.close, size: 18),
                       tooltip: '关闭面板',
-                      onPressed: _closeParamDrawer,
+                      onPressed: _closeDrawer,
                       visualDensity: VisualDensity.compact,
                     ),
                   ],
@@ -2383,12 +2767,7 @@ class _SettingsPageState extends State<SettingsPage> {
               Expanded(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.all(16),
-                  child: _buildParamEditorForm(
-                    config: config,
-                    primaryColor: primaryColor,
-                    updateState: setDrawerState,
-                    onClose: _closeParamDrawer,
-                  ),
+                  child: formContent,
                 ),
               ),
             ],
@@ -2398,8 +2777,8 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 构建移动端底部滑出 Bottom Sheet 内容
-  Widget _buildMobileBottomSheetContent(
+  /// 构建移动端底部滑出参数修改 Bottom Sheet 内容
+  Widget _buildMobileParamBottomSheet(
     BuildContext ctx,
     _ModelParamConfig config,
     Color primaryColor,
@@ -2409,7 +2788,7 @@ class _SettingsPageState extends State<SettingsPage> {
         final colors = context.appColors;
         return Container(
           constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(ctx).size.height * 0.75,
+            maxHeight: MediaQuery.of(ctx).size.height * 0.85,
           ),
           decoration: BoxDecoration(
             color: colors.surfaceModal,
@@ -2477,6 +2856,111 @@ class _SettingsPageState extends State<SettingsPage> {
                     updateState: setSheetState,
                     onClose: () => Navigator.of(ctx).pop(),
                   ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 构建移动端底部滑出通用选项（空闲回收、推理路线）Bottom Sheet 内容
+  Widget _buildMobileCustomBottomSheet(
+    BuildContext ctx, {
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color primaryColor,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setSheetState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) {
+    return StatefulBuilder(
+      builder: (context, setSheetState) {
+        final colors = context.appColors;
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+          ),
+          decoration: BoxDecoration(
+            color: colors.surfaceModal,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            boxShadow: [
+              BoxShadow(
+                color: context.colorScheme.shadow.withValues(alpha: 0.25),
+                blurRadius: 16,
+                offset: const Offset(0, -4),
+              ),
+            ],
+          ),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.only(top: 10, bottom: 6),
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: colors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(icon, color: primaryColor, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: colors.textPrimary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.textSecondary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, color: colors.borderSubtle),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: formBuilder(ctx, setSheetState, () => Navigator.of(ctx).pop()),
                 ),
               ),
             ],
@@ -2652,10 +3136,11 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 880;
+        _isWide = constraints.maxWidth >= 880;
+        final isWide = _isWide;
 
         if (isWide) {
-          final isDrawerOpen = _activeParamConfig != null;
+          final isDrawerOpen = _activeDrawerId != null;
 
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2704,9 +3189,11 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: isDrawerOpen
-                    ? _buildDesktopDrawerContent(
-                        _activeParamConfig!,
-                        primaryColor,
+                    ? OverflowBox(
+                        minWidth: 380,
+                        maxWidth: 380,
+                        alignment: Alignment.topRight,
+                        child: _buildDesktopDrawerContent(primaryColor),
                       )
                     : const SizedBox.shrink(),
               ),

@@ -12,9 +12,9 @@ import '../services/local_model_manager.dart';
 import '../services/platform_bridge.dart';
 import '../services/theme_manager.dart' hide AppTheme;
 import '../theme/app_theme.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/engine_status_badge.dart';
 import '../widgets/floating_status_badge.dart';
-import '../widgets/model_center_dialog.dart';
 import '../widgets/quick_capture_bottom_sheet.dart';
 import 'ai_extract_page.dart';
 import 'my_agenda_page.dart';
@@ -48,8 +48,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   /// 本机已激活可用的大模型列表
   List<String> _activeLocalModels = [];
   String? _selectedModelName;
-  Set<String> _downloadedSpecIds = {};
-  Map<String, double> _partialCacheMB = {};
 
   /// 待确认的 AI 提取草稿列表
   final List<AgendaEvent> _draftEvents = [];
@@ -177,14 +175,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   Future<void> _refreshLocalModelState({bool preserveLastEngineInfo = false}) async {
     final downloaded = <String>{};
-    final partial = <String, double>{};
     for (final spec in LocalModelManager.catalog) {
       if (await LocalModelManager.isModelDownloaded(spec)) {
         downloaded.add(spec.id);
-      }
-      final partMB = await LocalModelManager.getPartialDownloadSizeMB(spec);
-      if (partMB > 0.1) {
-        partial[spec.id] = partMB;
       }
     }
     final models = await LocalModelManager.ensureLocalRuntimeAndListModels();
@@ -216,13 +209,12 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
     if (!mounted) return;
     setState(() {
-      _downloadedSpecIds = downloaded;
-      _partialCacheMB = partial;
       _activeLocalModels = models;
       _engineIndicator = ind;
       _engineIndicatorDetail = indDetail;
 
-      if (_selectedModelName != null && !models.contains(_selectedModelName)) {
+      if (_selectedModelName != null &&
+          !models.any((m) => LocalModelManager.isSameModel(m, _selectedModelName))) {
         _selectedModelName = models.isNotEmpty ? models.first : null;
       }
       if (_selectedModelName == null && models.isNotEmpty) {
@@ -514,32 +506,9 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     _showSnack(batchRes.summaryMessage);
   }
 
-  void _showModelCenter() {
-    ModelCenterDialog.show(
-      context,
-      activeLocalModels: _activeLocalModels,
-      selectedModelName: _selectedModelName,
-      downloadedSpecIds: _downloadedSpecIds,
-      partialCacheMB: _partialCacheMB,
-      activeDownloads: LocalModelManager.activeDownloads,
-      onRefreshState: _refreshLocalModelState,
-      onSelectModel: (model) {
-        AIExtractorService.currentPreferredModel = model;
-        setState(() => _selectedModelName = model);
-      },
-      onEngineModeChanged: (mode) {
-        AIExtractorService.currentEngineMode = mode;
-        setState(() => _engineMode = mode);
-      },
-      onShowSnack: _showSnack,
-    );
-  }
-
   void _showSnack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-    );
+    AppToast.show(context, msg);
   }
 
   @override
@@ -739,11 +708,8 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           },
         );
       case 1:
-        return Padding(
-          padding: const EdgeInsets.all(12),
-          child: MyAgendaPage(
-            onNavigateToExtractor: () => setState(() => _tabIndex = 0),
-          ),
+        return MyAgendaPage(
+          onNavigateToExtractor: () => setState(() => _tabIndex = 0),
         );
       case 2:
       default:
@@ -757,7 +723,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
           engineIndicatorDetail: _engineIndicatorDetail,
           onPreloadModel: _handleEnginePreload,
           onUnloadModel: _handleEngineUnload,
-          onOpenModelCenter: _showModelCenter,
+          onOpenModelCenter: () => _refreshLocalModelState(),
           localIps: _localIps,
           peerIpController: _peerIpController,
           onStateRefreshed: _refreshLocalModelState,

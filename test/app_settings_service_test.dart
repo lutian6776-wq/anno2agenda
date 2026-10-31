@@ -24,6 +24,13 @@ void main() {
     final service = AppSettingsService.instance;
     await service.init(tempDir.path);
 
+    // Initial default values verify
+    expect(service.contextSize, 2048);
+    expect(service.maxThinkingTokens, 1536);
+    expect(service.temperature, 0.30);
+    expect(service.topP, 0.90);
+    expect(service.repeatPenalty, 1.10);
+
     // 1. Modify settings
     await service.setEngineMode(AIEngineMode.localLlmServer);
     await service.setIdleUnloadMinutes(10);

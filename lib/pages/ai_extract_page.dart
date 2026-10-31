@@ -5,6 +5,7 @@ import '../models/agenda_event.dart';
 import '../services/ai_extractor_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/agenda_event_card.dart';
+import '../widgets/app_toast.dart';
 import '../widgets/inference_terminal.dart';
 
 /// 「AI 提取」工作台页面（桌面端双列布局 + 移动端自适应 + 即刻收起抽屉）
@@ -74,10 +75,76 @@ class AIExtractPage extends StatefulWidget {
 
 class _AIExtractPageState extends State<AIExtractPage> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  bool _isSourceTextExpanded = false;
+  bool _isSourceTextExpanded = true;
+  bool _lastExtracting = false;
+  int _lastDraftCount = 0;
+
+  // 响应式桌面端让位抽屉与移动端底部弹窗状态
+  bool _isWide = false;
+  String? _activeDrawerId;
+  String _drawerTitle = '';
+  String _drawerSubtitle = '';
+  IconData _drawerIcon = Icons.event_note_outlined;
+  Widget Function(
+    BuildContext context,
+    StateSetter setDrawerState,
+    VoidCallback onClose,
+  )? _drawerFormBuilder;
+  final Map<String, GlobalKey> _tileKeys = {};
 
   bool get _isExtracting =>
       widget.terminalModel?.isExtracting ?? widget.isExtracting;
+
+  @override
+  void initState() {
+    super.initState();
+    _isSourceTextExpanded = true;
+    _lastExtracting = _isExtracting;
+    _lastDraftCount = widget.draftEvents.length;
+    widget.terminalModel?.addListener(_onTerminalModelUpdated);
+  }
+
+  @override
+  void didUpdateWidget(covariant AIExtractPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.terminalModel != widget.terminalModel) {
+      oldWidget.terminalModel?.removeListener(_onTerminalModelUpdated);
+      widget.terminalModel?.addListener(_onTerminalModelUpdated);
+    }
+    final currentExtracting = _isExtracting;
+    final currentDraftCount = widget.draftEvents.length;
+    // 当生成完成或产生新草稿时，默认保持/恢复通知原文卡片展开，方便用户校对
+    if ((_lastExtracting && !currentExtracting) ||
+        (currentDraftCount > 0 && currentDraftCount != _lastDraftCount)) {
+      _isSourceTextExpanded = true;
+    }
+    // 若当前正在编辑的草稿被删除，折叠关闭抽屉
+    if (_activeDrawerId != null &&
+        !widget.draftEvents.any((e) => 'event_${e.id}' == _activeDrawerId)) {
+      _closeDrawer();
+    }
+    _lastExtracting = currentExtracting;
+    _lastDraftCount = currentDraftCount;
+  }
+
+  void _onTerminalModelUpdated() {
+    final currentExtracting = _isExtracting;
+    if (_lastExtracting && !currentExtracting) {
+      // 模型提取与结构化解析完成后：自动展开通知原文卡片，方便用户校对
+      if (mounted) {
+        setState(() {
+          _isSourceTextExpanded = true;
+        });
+      }
+    }
+    _lastExtracting = currentExtracting;
+  }
+
+  @override
+  void dispose() {
+    widget.terminalModel?.removeListener(_onTerminalModelUpdated);
+    super.dispose();
+  }
 
   /// 获取当前已粘贴或已解析的通知原文
   String get _currentRawText {
@@ -89,6 +156,520 @@ class _AIExtractPageState extends State<AIExtractPage> {
       }
     }
     return '';
+  }
+
+  // ================= 自动让位抽屉与参数项体系（符合 DRAWER_DESIGN_SPEC.md） =================
+
+  void _closeDrawer() {
+    if (_activeDrawerId != null && mounted) {
+      setState(() => _activeDrawerId = null);
+    }
+  }
+
+  /// 抽屉内容与状态统一管理器
+  void _openCustomOptionDrawer({
+    required String drawerId,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    GlobalKey? anchorKey,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setDrawerState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) async {
+    // 再次点击同一行则折叠关闭
+    if (_activeDrawerId == drawerId) {
+      _closeDrawer();
+      return;
+    }
+
+    final isWide = _isWide;
+    if (isWide) {
+      setState(() {
+        _activeDrawerId = drawerId;
+        _drawerTitle = title;
+        _drawerSubtitle = subtitle;
+        _drawerIcon = icon;
+        _drawerFormBuilder = formBuilder;
+      });
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+          alignment: 0.25,
+        );
+      }
+    } else {
+      if (anchorKey?.currentContext != null) {
+        Scrollable.ensureVisible(
+          anchorKey!.currentContext!,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          alignment: 0.12,
+        );
+      }
+      setState(() {
+        _activeDrawerId = drawerId;
+        _drawerTitle = title;
+        _drawerSubtitle = subtitle;
+        _drawerIcon = icon;
+        _drawerFormBuilder = formBuilder;
+      });
+
+      await Future.delayed(const Duration(milliseconds: 60));
+      if (!mounted) return;
+
+      final primaryColor = context.colorScheme.primary;
+
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) {
+          return _buildMobileCustomBottomSheet(
+            ctx,
+            title: title,
+            subtitle: subtitle,
+            icon: icon,
+            primaryColor: primaryColor,
+            formBuilder: formBuilder,
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _activeDrawerId = null;
+        });
+      }
+    }
+  }
+
+  /// 统一标准紧凑参数列表项（整行可点击，右侧展示参数/状态 Badge）
+  Widget _buildCompactParamTile({
+    Key? key,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    String? valueBadge,
+    Widget? badgeWidget,
+    required VoidCallback onTap,
+    bool isEditing = false,
+  }) {
+    final colors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: isEditing
+            ? primaryColor.withValues(alpha: 0.08)
+            : colors.surfaceCard,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isEditing ? primaryColor : colors.borderSubtle,
+          width: isEditing ? 1.0 : 0.8,
+        ),
+      ),
+      child: InkWell(
+        key: key,
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                child: Center(
+                  child: Icon(
+                    icon,
+                    size: 20,
+                    color: isEditing ? primaryColor : primaryColor,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                        color: isEditing ? primaryColor : colors.textPrimary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: isEditing
+                            ? primaryColor.withValues(alpha: 0.8)
+                            : colors.textSecondary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              if (badgeWidget != null)
+                badgeWidget
+              else if (valueBadge != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: isEditing
+                        ? primaryColor.withValues(alpha: 0.16)
+                        : colors.surfaceLow,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: isEditing ? primaryColor : colors.borderSubtle,
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Text(
+                    valueBadge,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.bold,
+                      color: isEditing ? primaryColor : colors.textPrimary,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 4),
+              Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: isEditing ? primaryColor : colors.textTertiary,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 构建状态/参数 Badge 组件
+  Widget _buildEventStatusBadge(
+    AgendaEvent ev,
+    bool isEditing,
+    AppCustomColors appColors,
+    Color primaryColor,
+  ) {
+    if (ev.syncedToSystemCalendar) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: appColors.tagWork.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: appColors.tagWork,
+            width: 0.8,
+          ),
+        ),
+        child: Text(
+          '[ ✓ 已同步 ]',
+          style: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: appColors.tagWork,
+          ),
+        ),
+      );
+    }
+
+    final isCross = AgendaEventCard.isCrossDayEvent(ev.startTime, ev.endTime);
+    final badgeLabel = isCross
+        ? '[ 跨天日程 ]'
+        : '[ ${AgendaEventCard.getSourceLabel(ev.sourceType)} ]';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: isEditing
+            ? primaryColor.withValues(alpha: 0.16)
+            : appColors.surfaceLow,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: isEditing ? primaryColor : appColors.borderSubtle,
+          width: 0.8,
+        ),
+      ),
+      child: Text(
+        badgeLabel,
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          color: isEditing ? primaryColor : appColors.textPrimary,
+        ),
+      ),
+    );
+  }
+
+  /// 列表单行日程项构建
+  Widget _buildEventTile(AgendaEvent ev) {
+    final anchorKey = _tileKeys.putIfAbsent(ev.id, () => GlobalKey());
+    final isEditing = _activeDrawerId == 'event_${ev.id}';
+    final appColors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
+
+    final timeStr =
+        AgendaEventCard.formatSpan(ev.startTime, ev.endTime, showDate: true);
+    final details = <String>[timeStr];
+    if (ev.location.isNotEmpty) {
+      details.add('📍 ${ev.location}');
+    }
+    if (ev.description.isNotEmpty) {
+      details.add('📝 ${ev.description}');
+    }
+    if (ev.checklist.isNotEmpty) {
+      details.add('${ev.checklist.length}项待办');
+    }
+    final subtitle = details.join('  ·  ');
+
+    return _buildCompactParamTile(
+      key: anchorKey,
+      icon: Icons.event_note_outlined,
+      title: ev.title,
+      subtitle: subtitle,
+      badgeWidget:
+          _buildEventStatusBadge(ev, isEditing, appColors, primaryColor),
+      isEditing: isEditing,
+      onTap: () {
+        _openCustomOptionDrawer(
+          drawerId: 'event_${ev.id}',
+          title: '修改日程详情',
+          subtitle: ev.title,
+          icon: Icons.event_note_outlined,
+          anchorKey: anchorKey,
+          formBuilder: (ctx, setDrawerState, onClose) {
+            return AgendaEventCard(
+              event: ev,
+              isDraft: true,
+              showDate: true,
+              onSyncCalendar: () {
+                widget.onConfirmDraft(ev);
+                onClose();
+              },
+              onDelete: () {
+                widget.onRemoveDraft(ev);
+                onClose();
+              },
+              onEventChanged: (updated) {
+                _drawerSubtitle = updated.title;
+                widget.onUpdateDraft?.call(updated);
+                setDrawerState(() {});
+                setState(() {});
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 桌面端右侧 380dp 抽屉内容容器（包裹统一 Header 与表单）
+  Widget _buildDesktopDrawerContent(Color primaryColor) {
+    return StatefulBuilder(
+      builder: (context, setDrawerState) {
+        final colors = context.appColors;
+        return Container(
+          width: 380,
+          color: colors.surfaceModal,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 统一顶部 Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 10, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: primaryColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(_drawerIcon, color: primaryColor, size: 18),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _drawerTitle,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.bold,
+                              color: colors.textPrimary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _drawerSubtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.textSecondary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: '关闭面板',
+                      onPressed: _closeDrawer,
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: colors.borderSubtle),
+              // 统一表单内容滚动区
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: _drawerFormBuilder?.call(
+                        context,
+                        setDrawerState,
+                        _closeDrawer,
+                      ) ??
+                      const SizedBox.shrink(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 移动端底部 BottomSheet 容器（带小把手与最大 85% 高度约束）
+  Widget _buildMobileCustomBottomSheet(
+    BuildContext ctx, {
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color primaryColor,
+    required Widget Function(
+      BuildContext context,
+      StateSetter setSheetState,
+      VoidCallback onClose,
+    ) formBuilder,
+  }) {
+    final colors = ctx.appColors;
+    return StatefulBuilder(
+      builder: (context, setSheetState) {
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+          ),
+          decoration: BoxDecoration(
+            color: colors.surfaceModal,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 移动端顶部小把手
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(top: 8, bottom: 8),
+                  decoration: BoxDecoration(
+                    color: colors.borderSubtle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              // 移动端头部 Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 10, 10),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: primaryColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(icon, color: primaryColor, size: 18),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.bold,
+                              color: colors.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: '关闭面板',
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(height: 1, thickness: 1, color: colors.borderSubtle),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.only(
+                    left: 16,
+                    right: 16,
+                    top: 14,
+                    bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+                  ),
+                  child: formBuilder(
+                    ctx,
+                    setSheetState,
+                    () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// 统一抽屉呼出入口：手机从下方滑出，电脑/大屏从右侧滑出
@@ -131,7 +712,11 @@ class _AIExtractPageState extends State<AIExtractPage> {
               isBottom: true,
               onClose: () {
                 Navigator.of(sheetContext).pop();
-                if (mounted) setState(() {});
+                if (mounted) {
+                  setState(() {
+                    _isSourceTextExpanded = true;
+                  });
+                }
               },
             ),
           ),
@@ -161,7 +746,11 @@ class _AIExtractPageState extends State<AIExtractPage> {
           isBottom: false,
           onClose: () {
             Navigator.of(context).pop();
-            if (mounted) setState(() {});
+            if (mounted) {
+              setState(() {
+                _isSourceTextExpanded = true;
+              });
+            }
           },
         ),
       ),
@@ -174,16 +763,12 @@ class _AIExtractPageState extends State<AIExtractPage> {
     final text = data?.text?.trim() ?? '';
     if (text.isNotEmpty) {
       widget.inputController.text = text;
+      _isSourceTextExpanded = true;
       if (mounted) setState(() {});
       await widget.onRunExtraction(sourceType: 'clipboard');
     } else {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('剪贴板为空，已为您打开输入抽屉'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        AppToast.show(context, '剪贴板为空，已为您打开输入抽屉');
         _openInputDrawer(context);
       }
     }
@@ -373,7 +958,7 @@ class _AIExtractPageState extends State<AIExtractPage> {
               ],
             ),
           ),
-          // 原文正文文本（支持截断或完整展示）
+          // 原文正文文本（默认完整展开，方便校对，同时加约束滚动防超高溢出）
           InkWell(
             onTap: isLong
                 ? () {
@@ -384,18 +969,31 @@ class _AIExtractPageState extends State<AIExtractPage> {
                 : null,
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 2, 12, 10),
-              child: Text(
-                rawText,
-                maxLines: _isSourceTextExpanded ? null : 2,
-                overflow: _isSourceTextExpanded
-                    ? TextOverflow.visible
-                    : TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: appColors.textSecondary,
-                  height: 1.45,
-                ),
-              ),
+              child: _isSourceTextExpanded
+                  ? ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: SingleChildScrollView(
+                        physics: const ClampingScrollPhysics(),
+                        child: Text(
+                          rawText,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: appColors.textSecondary,
+                            height: 1.45,
+                          ),
+                        ),
+                      ),
+                    )
+                  : Text(
+                      rawText,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: appColors.textSecondary,
+                        height: 1.45,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -778,19 +1376,7 @@ class _AIExtractPageState extends State<AIExtractPage> {
                   children: [
                     _buildListHeader(appColors, primaryColor),
                     for (final ev in widget.draftEvents)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: AgendaEventCard(
-                          event: ev,
-                          showDate: true,
-                          isDraft: true,
-                          onSyncCalendar: () => widget.onConfirmDraft(ev),
-                          onDelete: () => widget.onRemoveDraft(ev),
-                          onEventChanged: (updated) {
-                            widget.onUpdateDraft?.call(updated);
-                          },
-                        ),
-                      ),
+                      _buildEventTile(ev),
                   ],
                 ),
         ),
@@ -884,19 +1470,7 @@ class _AIExtractPageState extends State<AIExtractPage> {
                   else if (widget.draftEvents.isNotEmpty) ...[
                     _buildListHeader(appColors, primaryColor),
                     for (final ev in widget.draftEvents)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: AgendaEventCard(
-                          event: ev,
-                          showDate: true,
-                          isDraft: true,
-                          onSyncCalendar: () => widget.onConfirmDraft(ev),
-                          onDelete: () => widget.onRemoveDraft(ev),
-                          onEventChanged: (updated) {
-                            widget.onUpdateDraft?.call(updated);
-                          },
-                        ),
-                      ),
+                      _buildEventTile(ev),
                   ],
                 ],
               ),
@@ -921,29 +1495,76 @@ class _AIExtractPageState extends State<AIExtractPage> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final isCompact = constraints.maxWidth < 760;
+        _isWide = constraints.maxWidth >= 880;
+        final isDrawerOpen = _isWide && _activeDrawerId != null;
 
-        return Scaffold(
-          key: _scaffoldKey,
-          backgroundColor: Colors.transparent,
-          endDrawer: _buildRightDrawer(context),
-          body: isCompact
-              ? _buildMobileLayout(
-                  context,
-                  appColors,
-                  primaryColor,
-                  rawText,
-                  hasContentToShow,
-                )
-              : _buildDesktopLayout(
-                  context,
-                  appColors,
-                  primaryColor,
-                  rawText,
+        if (_isWide) {
+          return Scaffold(
+            key: _scaffoldKey,
+            backgroundColor: Colors.transparent,
+            endDrawer: _buildRightDrawer(context),
+            body: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: _buildDesktopLayout(
+                    context,
+                    appColors,
+                    primaryColor,
+                    rawText,
+                  ),
                 ),
-          floatingActionButton:
-              isCompact ? _buildFab(context, primaryColor) : null,
-        );
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOutCubic,
+                  width: isDrawerOpen ? 380 : 0,
+                  decoration: BoxDecoration(
+                    color: appColors.surfaceModal,
+                    border: Border(
+                      left: BorderSide(
+                        color: appColors.borderSubtle,
+                        width: isDrawerOpen ? 1 : 0,
+                      ),
+                    ),
+                    boxShadow: isDrawerOpen
+                        ? [
+                            BoxShadow(
+                              color: context.colorScheme.shadow
+                                  .withValues(alpha: 0.16),
+                              blurRadius: 16,
+                              offset: const Offset(-4, 0),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  clipBehavior: Clip.hardEdge,
+                  child: isDrawerOpen
+                      ? OverflowBox(
+                          minWidth: 380,
+                          maxWidth: 380,
+                          alignment: Alignment.topRight,
+                          child: _buildDesktopDrawerContent(primaryColor),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ],
+            ),
+          );
+        } else {
+          return Scaffold(
+            key: _scaffoldKey,
+            backgroundColor: Colors.transparent,
+            endDrawer: _buildRightDrawer(context),
+            body: _buildMobileLayout(
+              context,
+              appColors,
+              primaryColor,
+              rawText,
+              hasContentToShow,
+            ),
+            floatingActionButton: _buildFab(context, primaryColor),
+          );
+        }
       },
     );
   }
@@ -980,12 +1601,7 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
     final text = data?.text?.trim() ?? '';
     if (text.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('剪贴板为空或无文本权限'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.show(context, '剪贴板为空或无文本权限');
       return;
     }
     setState(() {
@@ -1009,12 +1625,7 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
   Future<void> _handleExtract() async {
     final text = widget.controller.text.trim();
     if (text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('请先输入或粘贴通知内容'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.show(context, '请先输入或粘贴通知内容');
       return;
     }
 

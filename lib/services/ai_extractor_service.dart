@@ -158,8 +158,18 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
 
   /// 默认标准系统提示词模板（支持 {TIME_ANCHOR} 宏替换）
   static const String defaultSystemPromptTemplate = '''你是一个运行在端侧设备的高校通知日程提取助手。
+	严禁输出任何 Markdown 格式，返回内容的第一个字符必须是 {，最后一个字符必须是 }，且中间必须包含"events":字段。
 【当前系统时间锚点】：{TIME_ANCHOR}
-请从用户输入的杂乱群通知、教务文档或视频字幕中提取出所有日程事件，并将相对时间（如“明天”、“本周日”、“下周三晚7点”）严格换算为基于当前时间锚点的 ISO-8601 格式时间。
+在思考时彼免一些不必要的解释以防浪费字符数（注意提供给你思考的Token仅有1850Token请注意思考长）
+请从用户输入的杂乱群通知、教务文档、视频字幕或聊天消息中，识别并拆分出所有具有明确时间属性的日程事件，包括课程、考试、会议、活动、报名、截止、开始、值班、查寝、讲座、班会、实验、答辩、体检、军训、团课、竞赛报名等.
+对“今天、明天、后天、本周X、下周X、每晚、截止、报名结束、预计、大约、左右”等相对或模糊时间表达，必需基于当前时间锚点的 ISO-8601 格式时间严格换算为具体日期并与原文校对；若仅有日期无具体时间，默认输出开始时间为 北京时间00:00，结束时间为 北京时间23:59；若仅有时段无日期，则默认输出日期为当前系统时间锚点所在日期。
+在填写将要输出的startTime 和 endTime 时，必须严格保证始终遵守以下规则：
+1.	禁止模糊提取：如果文本只提到“10月28日”而没有具体时间，startTime 默认为 2026-10-28T00:00:00，endTime 必须为 2026-10-28T23:59:00。
+2.	时段截取强制对齐：当文本中出现时间段表达（例如“9:00—17:00”、“14:30到16:00”）时，必须将前半部分填入 startTime，后半部分填入 endTime。
+3.	非时间数字隔离：任何与“人数、金额、房间号、电话、版本号、志愿时长、分数”相关的数字，绝对禁止进入 startTime 和 endTime 字段，必须隔离至 description 或 checklist 字段中。
+4.若全文都没有准确地提到开始和截止时间但有上午，中午，下午，晚上，则默认上午时间对应为（6点00——11点00），中午时间对应为（11点00——13点00），下午时间对应为（13点00——18点00），晚上时间对应为（18点00——8点40）。
+5. 禁止模糊提取，若将要输出的startTime 和 endTime 只有startTime为准确时间，无endTime，则默认endTime输出为23点59分。
+地点（例如南校5A102，5A102，大学生活动中心，人民路1号，中心公园等）、腾讯会议等会议号、待办物品等信息若未明确提及，可留空或使用“未注明”，不得编造。最终只输出一个严格合法的JSON对象，不得包含 Markdown、代码块、注释、解释文字或多余字段；若无任何可提取事件，返回 {"events":[]}。
 必须输出如下结构的 JSON 对象：
 {
   "events": [
@@ -174,7 +184,9 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       "confidence": 0.95
     }
   ]
-}''';
+}
+检查 startTime 和 endTime：确认里面的数字只来自“时间表达”，严禁包含人数、金额、电话、房间号。检查输出格式：确认第一个字符是 {，最后一个字符是 }，中间没有任何 Markdown 符号（如 ```）。检查时间换算：确认“明天/下周”已换算为具体日期。
+''';
 
   /// 用户自定义配置的系统提示词（若为 null 则使用 defaultSystemPromptTemplate）
   static String? customSystemPromptTemplate;
@@ -255,7 +267,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
   static Future<ExtractionResult> extractFromText({
     required String rawText,
     String sourceType = 'manual',
-    AIEngineMode mode = AIEngineMode.hybridAuto,
+    AIEngineMode? mode,
     String llmEndpoint = 'http://127.0.0.1:11434/api/generate',
     String? llmModelName,
     bool? thinkMode,
@@ -264,6 +276,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     ExtractionProgressCallback? onProgress,
     InferenceTerminalModel? terminalModel,
   }) async {
+    final effectiveMode = mode ?? currentEngineMode;
     final incomingOnProgress = onProgress;
     onProgress = (terminalModel != null && incomingOnProgress != null)
         ? ({String? stepLog, String? token, int? tokenCount}) {
@@ -293,8 +306,8 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
 
     var tokenCounter = 0;
 
-    if (mode == AIEngineMode.localLlmServer ||
-        mode == AIEngineMode.hybridAuto) {
+    if (effectiveMode == AIEngineMode.localLlmServer ||
+        effectiveMode == AIEngineMode.hybridAuto) {
       try {
         // 自动探测本机已有的大模型（Android 沙盒 GGUF 或 Windows 本地服务）
         String targetModel = llmModelName ?? '';
@@ -367,6 +380,9 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         }
 
         // 2. Windows 桌面端 或 局域网桌面算力协同接口 (/extract)
+        if (Platform.isWindows && llmEndpoint.contains('127.0.0.1:11434')) {
+          await LocalModelManager.preloadModel(preferredModelId: targetModel);
+        }
         onProgress?.call(stepLog: '[路由] 连接本地/局域网推理服务: $targetModel');
         if (effectiveGbnf && !llmEndpoint.endsWith('/extract')) {
           onProgress?.call(
@@ -1212,6 +1228,9 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       }
 
       // 2. Windows 桌面端或 HTTP 接口
+      if (Platform.isWindows && llmEndpoint.contains('127.0.0.1:11434')) {
+        await LocalModelManager.preloadModel(preferredModelId: targetModel);
+      }
       onProgress?.call(stepLog: '[路由] 连接本地推理引擎: $targetModel');
       final client = LocalModelManager.createDirectHttpClient(
         timeout: const Duration(seconds: 4),
@@ -1497,36 +1516,116 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
   }
 
   static _TimeSpan? _parseDateTimeFromSegment(String seg, DateTime anchor) {
-    DateTime? targetDate;
+    DateTime? startDate;
+    DateTime? endDate;
 
-    // A. 匹配显式月日：如 10月20日、10月25号、2026-10-20、10/20
-    final explicitDate =
-        RegExp(r'(?:(\d{4})[年\-/])?(\d{1,2})[月\-/](\d{1,2})[日号]?')
-            .firstMatch(seg);
-    if (explicitDate != null) {
-      final year = int.tryParse(explicitDate.group(1) ?? '') ?? anchor.year;
-      final month = int.tryParse(explicitDate.group(2)!) ?? anchor.month;
-      final day = int.tryParse(explicitDate.group(3)!) ?? anchor.day;
-      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-        targetDate = DateTime(year, month, day);
+    // A1. 匹配显式跨天日期区间：如 10月25日-10月27日、10月25日至27日、10/25 - 10/27、2026-10-25至2026-10-27
+    final explicitDateRange = RegExp(
+      r'(?:(\d{4})[年\-/])?(\d{1,2})[月\-/](\d{1,2})[日号]?\s*(?:[-~至到与和]|到)\s*(?:(\d{4})[年\-/])?(?:(\d{1,2})[月\-/])?(\d{1,2})[日号]?',
+    ).firstMatch(seg);
+
+    if (explicitDateRange != null) {
+      final y1 = int.tryParse(explicitDateRange.group(1) ?? '') ?? anchor.year;
+      final m1 = int.tryParse(explicitDateRange.group(2) ?? '') ?? anchor.month;
+      final d1 = int.tryParse(explicitDateRange.group(3) ?? '') ?? anchor.day;
+
+      final y2 = int.tryParse(explicitDateRange.group(4) ?? '') ?? y1;
+      final m2 = int.tryParse(explicitDateRange.group(5) ?? '') ?? m1;
+      final d2 = int.tryParse(explicitDateRange.group(6) ?? '') ?? d1;
+
+      if (m1 >= 1 && m1 <= 12 && d1 >= 1 && d1 <= 31 &&
+          m2 >= 1 && m2 <= 12 && d2 >= 1 && d2 <= 31) {
+        startDate = DateTime(y1, m1, d1);
+        endDate = DateTime(y2, m2, d2);
       }
     }
 
-    // B. 匹配相对日期：今天、明天、后天、大后天
-    if (targetDate == null) {
+    // A2. 匹配显式单日期：如 10月20日、10月25号、2026-10-20、10/20
+    if (startDate == null) {
+      final explicitDate =
+          RegExp(r'(?:(\d{4})[年\-/])?(\d{1,2})[月\-/](\d{1,2})[日号]?')
+              .firstMatch(seg);
+      if (explicitDate != null) {
+        final year = int.tryParse(explicitDate.group(1) ?? '') ?? anchor.year;
+        final month = int.tryParse(explicitDate.group(2)!) ?? anchor.month;
+        final day = int.tryParse(explicitDate.group(3)!) ?? anchor.day;
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+          startDate = DateTime(year, month, day);
+        }
+      }
+    }
+
+    // B1. 匹配相对跨天词汇：如“今天...到明天...”、“今晚...到明天/次日...”
+    if (startDate == null) {
+      if ((seg.contains('今天') || seg.contains('今晚') || seg.contains('今日')) &&
+          (seg.contains('明天') || seg.contains('明日') || seg.contains('次日'))) {
+        startDate = DateTime(anchor.year, anchor.month, anchor.day);
+        endDate = DateTime(anchor.year, anchor.month, anchor.day + 1);
+      } else if ((seg.contains('明天') || seg.contains('明日')) &&
+          seg.contains('后天')) {
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + 1);
+        endDate = DateTime(anchor.year, anchor.month, anchor.day + 2);
+      }
+    }
+
+    // B2. 匹配相对周几区间：如“周五至周日”、“周一到周三”
+    if (startDate == null) {
+      final weekRangeMatch = RegExp(
+        r'(本周|这周|下周|星期|周|礼拜)?([一二三四五六日天])\s*(?:[-~至到与和]|到)\s*(本周|这周|下周|星期|周|礼拜)?([一二三四五六日天])',
+      ).firstMatch(seg);
+      if (weekRangeMatch != null) {
+        const map = {
+          '一': 1,
+          '二': 2,
+          '三': 3,
+          '四': 4,
+          '五': 5,
+          '六': 6,
+          '日': 7,
+          '天': 7
+        };
+        final p1 = weekRangeMatch.group(1);
+        final w1 = map[weekRangeMatch.group(2)!] ?? anchor.weekday;
+        final p2 = weekRangeMatch.group(3);
+        final w2 = map[weekRangeMatch.group(4)!] ?? anchor.weekday;
+
+        int delta1 = w1 - anchor.weekday;
+        if (p1 == '下周') {
+          delta1 += 7;
+        } else if (delta1 < 0) {
+          delta1 += 7;
+        }
+
+        int delta2 = w2 - anchor.weekday;
+        if (p2 == '下周') {
+          delta2 += 7;
+        } else if (delta2 < 0) {
+          delta2 += 7;
+        }
+        if (delta2 < delta1) {
+          delta2 += 7;
+        }
+
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + delta1);
+        endDate = DateTime(anchor.year, anchor.month, anchor.day + delta2);
+      }
+    }
+
+    // B3. 匹配相对单日期：今天、明天、后天、大后天
+    if (startDate == null) {
       if (seg.contains('大后天')) {
-        targetDate = DateTime(anchor.year, anchor.month, anchor.day + 3);
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + 3);
       } else if (seg.contains('后天')) {
-        targetDate = DateTime(anchor.year, anchor.month, anchor.day + 2);
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + 2);
       } else if (seg.contains('明天') || seg.contains('明日')) {
-        targetDate = DateTime(anchor.year, anchor.month, anchor.day + 1);
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + 1);
       } else if (seg.contains('今天') || seg.contains('今日') || seg.contains('今晚')) {
-        targetDate = DateTime(anchor.year, anchor.month, anchor.day);
+        startDate = DateTime(anchor.year, anchor.month, anchor.day);
       }
     }
 
-    // C. 匹配相对周几：本周五、下周三、周日等
-    if (targetDate == null) {
+    // C. 匹配相对单周几：本周五、下周三、周日等
+    if (startDate == null) {
       final weekMatch =
           RegExp(r'(本周|这周|下周|星期|周|礼拜)([一二三四五六日天])').firstMatch(seg);
       if (weekMatch != null) {
@@ -1549,17 +1648,18 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         } else if (delta < 0) {
           delta += 7;
         }
-        targetDate = DateTime(anchor.year, anchor.month, anchor.day + delta);
+        startDate = DateTime(anchor.year, anchor.month, anchor.day + delta);
       }
     }
 
-    if (targetDate == null) return null;
+    if (startDate == null) return null;
 
     // D. 提取具体几点几分
     int hour = 9;
     int minute = 0;
     int endHour = 10;
     int endMinute = 0;
+    bool hasExplicitOvernight = false;
 
     final isPm = seg.contains('下午') ||
         seg.contains('晚上') ||
@@ -1581,19 +1681,28 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       endMinute = 59;
     }
 
-    // 匹配形如 14:30 - 16:00 或 19:00 或 下午2点半
-    final rangeTime =
-        RegExp(r'(\d{1,2})[:：点时](\d{1,2}|半)?\s*[-~至到]\s*(\d{1,2})[:：点时](\d{1,2}|半)?')
-            .firstMatch(seg);
+    // 匹配形如 14:30 - 16:00 或 22:00 - 02:00 或 晚上10点至次日凌晨2点
+    final rangeTime = RegExp(
+      r'(\d{1,2})[:：点时](\d{1,2}|半)?\s*[-~至到]\s*(?:(次日|凌晨|隔天|隔日|明天)\s*)?(\d{1,2})[:：点时](\d{1,2}|半)?',
+    ).firstMatch(seg);
     if (rangeTime != null) {
       hour = int.parse(rangeTime.group(1)!);
       final m1 = rangeTime.group(2);
       minute = m1 == '半' ? 30 : (int.tryParse(m1 ?? '0') ?? 0);
-      endHour = int.parse(rangeTime.group(3)!);
-      final m2 = rangeTime.group(4);
+
+      final nextDayPrefix = rangeTime.group(3);
+      if (nextDayPrefix != null && nextDayPrefix.isNotEmpty) {
+        hasExplicitOvernight = true;
+      }
+
+      endHour = int.parse(rangeTime.group(4)!);
+      final m2 = rangeTime.group(5);
       endMinute = m2 == '半' ? 30 : (int.tryParse(m2 ?? '0') ?? 0);
       if (isPm && hour < 12) hour += 12;
-      if (isPm && endHour < 12) endHour += 12;
+      // 若无显式次日标记且下午标记存在，且结束时间合理在下午，顺延pm
+      if (isPm && endHour < 12 && !hasExplicitOvernight && endHour >= hour) {
+        endHour += 12;
+      }
     } else {
       final singleTime =
           RegExp(r'(\d{1,2}|[一二三四五六七八九十]{1,2})[:：点时](\d{1,2}|半)?')
@@ -1608,14 +1717,43 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       }
     }
 
-    final start =
-        DateTime(targetDate.year, targetDate.month, targetDate.day, hour, minute);
-    final end = DateTime(
-        targetDate.year, targetDate.month, targetDate.day, endHour, endMinute);
-    return _TimeSpan(
-      start,
-      end.isAfter(start) ? end : start.add(const Duration(hours: 1)),
+    // 智能跨天判断：若未指定结束日期，但存在显式跨天/次日词汇，或结束时分早于开始时分（例如 22:00 至 02:00）
+    if (endDate == null) {
+      if (hasExplicitOvernight ||
+          (endHour < hour) ||
+          (endHour == hour && endMinute < minute)) {
+        endDate = startDate.add(const Duration(days: 1));
+      } else {
+        endDate = startDate;
+      }
+    }
+
+    final start = DateTime(
+      startDate.year,
+      startDate.month,
+      startDate.day,
+      hour,
+      minute,
     );
+    var end = DateTime(
+      endDate.year,
+      endDate.month,
+      endDate.day,
+      endHour,
+      endMinute,
+    );
+
+    if (end.isBefore(start)) {
+      if (startDate.year == endDate.year &&
+          startDate.month == endDate.month &&
+          startDate.day == endDate.day) {
+        end = end.add(const Duration(days: 1));
+      } else {
+        end = start.add(const Duration(hours: 1));
+      }
+    }
+
+    return _TimeSpan(start, end);
   }
 
   static int _parseChineseOrArabicNumber(String raw) {

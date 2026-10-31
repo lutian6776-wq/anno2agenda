@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MeetSync</string>
+    <string name="accessibility_service_label">MeetSync Screen AI Assistant</string>
+    <string name="accessibility_service_description">Extract events and agendas from your screen using MeetSync floating bubble.</string>
+</resources>
