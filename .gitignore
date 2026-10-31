@@ -146,3 +146,9 @@ windows/runner/Release/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# =====================================================================
+# 9. 本地设计原图与图标临时素材 (Design Sources & Temporary Icons)
+# =====================================================================
+logo.png
+assets/icon/
