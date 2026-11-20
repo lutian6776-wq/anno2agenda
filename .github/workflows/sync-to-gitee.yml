@@ -1,0 +1,52 @@
+name: Sync to Gitee
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-to-gitee
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Push main and tags to Gitee
+        env:
+          GITEE_PRIVATE_KEY: ${{ secrets.GITEE_PRIVATE_KEY }}
+          GITEE_REPO: git@gitee.com:street-stall/anno2agenda.git
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GITEE_PRIVATE_KEY}" ]; then
+            echo "::error::Missing repository secret GITEE_PRIVATE_KEY. Add your SSH private key in GitHub Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${GITEE_PRIVATE_KEY}" | tr -d '\r' > ~/.ssh/id_gitee
+          chmod 600 ~/.ssh/id_gitee
+          ssh-keyscan -H gitee.com >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          # Ensure refs/remotes/origin/main and all tags exist even on tag-only push events
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags --force
+
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_gitee -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git push --force "${GITEE_REPO}" refs/remotes/origin/main:refs/heads/main
+          git push --force "${GITEE_REPO}" --tags
