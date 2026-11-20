@@ -99,11 +99,17 @@ void main() {
     await tester.pumpAndSettle();
 
     // Verify Advanced Settings card exists
+    final promptTileFinder = find.text('系统提示词模板');
+    await tester.scrollUntilVisible(
+      promptTileFinder,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('高级设置'), findsWidgets);
-    expect(find.text('系统提示词模板'), findsOneWidget);
+    expect(promptTileFinder, findsOneWidget);
 
     // Tap entry and navigate to PromptTestingPage
-    await tester.tap(find.text('系统提示词模板'));
+    await tester.tap(promptTileFinder);
     await tester.pumpAndSettle();
 
     // Verify PromptTestingPage elements

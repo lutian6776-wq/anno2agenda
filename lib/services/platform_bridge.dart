@@ -203,7 +203,6 @@ class PlatformBridge {
             mode: AIExtractorService.currentEngineMode,
             llmEndpoint: AIExtractorService.currentLlmEndpoint,
             llmModelName: AIExtractorService.currentPreferredModel,
-            thinkMode: LocalModelManager.enableThinkMode,
             onProgress: ({stepLog, token, tokenCount}) {
               if (tokenCount != null && tokenCount % 8 == 1) {
                 sendOverlayProgress('🧠 端侧大模型生成中 (已输出 $tokenCount tokens)...');

@@ -15,6 +15,7 @@ void main() {
   });
 
   tearDown(() async {
+    AppSettingsService.instance.resetForTest();
     if (await tempDir.exists()) {
       await tempDir.delete(recursive: true);
     }
@@ -97,5 +98,60 @@ void main() {
     expect(service.temperature, AppSettingsService.defaultTemperature);
     expect(service.topP, AppSettingsService.defaultTopP);
     expect(service.repeatPenalty, AppSettingsService.defaultRepeatPenalty);
+  });
+
+  test('AppSettingsService saves and restores cloud engine configuration', () async {
+    final service = AppSettingsService.instance;
+    await service.init(tempDir.path);
+
+    // Defaults
+    expect(service.enableCloudEngine, isFalse);
+    expect(service.cloudRiskAccepted, isFalse);
+    expect(service.cloudApiUrl, isEmpty);
+    expect(service.cloudApiKey, isEmpty);
+    expect(service.cloudModelName, isEmpty);
+    expect(service.enableCloudThinkMode, isFalse);
+    expect(service.isCloudConfigured, isFalse);
+
+    // Update cloud settings
+    await service.setCloudRiskAccepted(true);
+    await service.setEnableCloudEngine(true);
+    await service.setCloudServiceConfig(
+      apiUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'sk-test-cloud-key',
+      modelName: 'deepseek-chat',
+    );
+    await service.setEnableCloudThinkMode(true);
+    await service.setFavoriteCloudModels(['deepseek-chat', 'deepseek-reasoner']);
+    await service.setFetchedCloudModels(['deepseek-chat']);
+
+    expect(service.isCloudConfigured, isTrue);
+    expect(service.isFavoriteCloudModelAvailable('deepseek-chat'), isTrue);
+    expect(service.isFavoriteCloudModelAvailable('deepseek-reasoner'), isFalse);
+    expect(AIExtractorService.enableCloudEngine, isTrue);
+    expect(AIExtractorService.cloudApiUrl, 'https://api.deepseek.com/v1');
+    expect(AIExtractorService.cloudApiKey, 'sk-test-cloud-key');
+    expect(AIExtractorService.cloudModelName, 'deepseek-chat');
+    expect(AIExtractorService.enableCloudThinkMode, isTrue);
+    expect(AIExtractorService.favoriteCloudModels,
+        ['deepseek-chat', 'deepseek-reasoner']);
+    expect(AIExtractorService.fetchedCloudModels, ['deepseek-chat']);
+
+    // Reload from disk into clean singleton state
+    service.resetForTest();
+    expect(service.enableCloudEngine, isFalse);
+    expect(service.favoriteCloudModels, isEmpty);
+
+    await service.init(tempDir.path);
+    expect(service.enableCloudEngine, isTrue);
+    expect(service.cloudRiskAccepted, isTrue);
+    expect(service.cloudApiUrl, 'https://api.deepseek.com/v1');
+    expect(service.cloudApiKey, 'sk-test-cloud-key');
+    expect(service.cloudModelName, 'deepseek-chat');
+    expect(service.enableCloudThinkMode, isTrue);
+    expect(service.favoriteCloudModels,
+        ['deepseek-chat', 'deepseek-reasoner']);
+    expect(service.fetchedCloudModels, ['deepseek-chat']);
+    expect(AIExtractorService.isCloudEngineReadyToRoute, isTrue);
   });
 }

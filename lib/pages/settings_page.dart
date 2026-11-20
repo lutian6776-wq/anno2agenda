@@ -93,6 +93,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // 各设置栏目 GlobalKey，用于桌面端侧边导航平滑锚点跳转
   final GlobalKey _themeKey = GlobalKey();
+  final GlobalKey _cloudKey = GlobalKey();
   final GlobalKey _modelKey = GlobalKey();
   final GlobalKey _floatingKey = GlobalKey();
   final GlobalKey _calendarKey = GlobalKey();
@@ -101,6 +102,8 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey _aboutKey = GlobalKey();
 
   // 抽屉与参数锚点 GlobalKey，用于桌面/移动端背景定位
+  final GlobalKey _paramCloudManagerKey = GlobalKey();
+  final GlobalKey _paramCloudModelSelectKey = GlobalKey();
   final GlobalKey _paramModelManagerKey = GlobalKey();
   final GlobalKey _paramIdleUnloadKey = GlobalKey();
   final GlobalKey _paramEngineModeKey = GlobalKey();
@@ -111,11 +114,19 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey _paramTopPKey = GlobalKey();
   final GlobalKey _paramRepeatPenaltyKey = GlobalKey();
 
-  // 当前激活的抽屉标识（可以是参数 title、'modelManager'、'idleUnload'、'engineMode' 或 'calendarSync'）
+  // 当前激活的抽屉标识（可以是参数 title、'cloudServiceManager'、'cloudModelSelector'、'modelManager'、'idleUnload'、'engineMode' 或 'calendarSync'）
   String? _activeDrawerId;
   _ModelParamConfig? _activeParamConfig;
   double _tempParamValue = 0.0;
   final TextEditingController _paramTextController = TextEditingController();
+  final TextEditingController _cloudUrlController = TextEditingController();
+  final TextEditingController _cloudKeyController = TextEditingController();
+  bool _obscureCloudKey = true;
+  String? _cloudDrawerFeedback;
+  bool _cloudDrawerFeedbackSuccess = false;
+  int _cloudServiceStep = 0;
+  bool _isFavoriteDropdownExpanded = false;
+  bool _isFetchingCloudModels = false;
 
   final ScrollController _scrollController = ScrollController();
   int _activeNavIndex = 0;
@@ -134,6 +145,8 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     _paramTextController.dispose();
+    _cloudUrlController.dispose();
+    _cloudKeyController.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     FloatingOverlayService.instance.isRunningNotifier
@@ -311,6 +324,12 @@ class _SettingsPageState extends State<SettingsPage> {
         label: '外观主题',
         icon: Icons.palette_outlined,
         key: _themeKey,
+      ),
+      _SettingsNavSection(
+        id: 'cloud',
+        label: '云端引擎',
+        icon: Icons.cloud_outlined,
+        key: _cloudKey,
       ),
       _SettingsNavSection(
         id: 'model',
@@ -604,18 +623,20 @@ class _SettingsPageState extends State<SettingsPage> {
     required String subtitle,
     String? valueBadge,
     Widget? badgeWidget,
-    required VoidCallback onTap,
+    required VoidCallback? onTap,
     bool isEditing = false,
+    bool enabled = true,
   }) {
     final appColors = context.appColors;
     final primaryColor = context.colorScheme.primary;
+    final effectiveEditing = enabled && isEditing;
 
     return InkWell(
       key: key,
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        color: isEditing
+        color: effectiveEditing
             ? primaryColor.withValues(alpha: 0.08)
             : Colors.transparent,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
@@ -624,7 +645,7 @@ class _SettingsPageState extends State<SettingsPage> {
             Icon(
               icon,
               size: 20,
-              color: isEditing ? primaryColor : primaryColor,
+              color: enabled ? primaryColor : appColors.textTertiary,
             ),
             const SizedBox(width: 12),
             // 左侧说明区（主标题带中英文对照，副标题单行简述默认值）
@@ -637,7 +658,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: TextStyle(
                       fontSize: 13.5,
                       fontWeight: FontWeight.w600,
-                      color: isEditing ? primaryColor : appColors.textPrimary,
+                      color: !enabled
+                          ? appColors.textTertiary
+                          : (effectiveEditing
+                              ? primaryColor
+                              : appColors.textPrimary),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -647,9 +672,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     subtitle,
                     style: TextStyle(
                       fontSize: 11.5,
-                      color: isEditing
-                          ? primaryColor.withValues(alpha: 0.8)
-                          : appColors.textSecondary,
+                      color: !enabled
+                          ? appColors.textTertiary
+                          : (effectiveEditing
+                              ? primaryColor.withValues(alpha: 0.8)
+                              : appColors.textSecondary),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -665,12 +692,14 @@ class _SettingsPageState extends State<SettingsPage> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: isEditing
+                  color: effectiveEditing
                       ? primaryColor.withValues(alpha: 0.16)
                       : appColors.surfaceLow,
                   borderRadius: BorderRadius.circular(6),
                   border: Border.all(
-                    color: isEditing ? primaryColor : appColors.borderSubtle,
+                    color: effectiveEditing
+                        ? primaryColor
+                        : appColors.borderSubtle,
                     width: 0.8,
                   ),
                 ),
@@ -680,7 +709,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     fontFamily: 'monospace',
                     fontSize: 12.5,
                     fontWeight: FontWeight.bold,
-                    color: isEditing ? primaryColor : appColors.textPrimary,
+                    color: !enabled
+                        ? appColors.textTertiary
+                        : (effectiveEditing
+                            ? primaryColor
+                            : appColors.textPrimary),
                   ),
                 ),
               ),
@@ -688,7 +721,7 @@ class _SettingsPageState extends State<SettingsPage> {
             Icon(
               Icons.chevron_right,
               size: 16,
-              color: isEditing ? primaryColor : appColors.textTertiary,
+              color: effectiveEditing ? primaryColor : appColors.textTertiary,
             ),
           ],
         ),
@@ -818,6 +851,1622 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           );
         }).toList(),
+      ),
+    );
+  }
+
+  // ==========================================
+  // 模块二（前）：云端大模型引擎（OpenAI-Compatible）
+  // ==========================================
+  static const List<Map<String, String>> _cloudProviderPresets = [
+    {
+      'name': 'DeepSeek',
+      'tag': '高性价比推理',
+      'url': 'https://api.deepseek.com/v1',
+      'model': 'deepseek-chat',
+    },
+    {
+      'name': '硅基流动 SiliconFlow',
+      'tag': '国内高速',
+      'url': 'https://api.siliconflow.cn/v1',
+      'model': 'Qwen/Qwen2.5-7B-Instruct',
+    },
+    {
+      'name': '阿里云百炼',
+      'tag': 'Qwen 官方',
+      'url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'model': 'qwen-plus',
+    },
+    {
+      'name': 'OpenAI 官方',
+      'tag': '标准接口',
+      'url': 'https://api.openai.com/v1',
+      'model': 'gpt-4o-mini',
+    },
+  ];
+
+  Widget _buildCloudEngineSection() {
+    final appColors = context.appColors;
+    final primaryColor = context.colorScheme.primary;
+    final settings = AppSettingsService.instance;
+    final isCloudEnabled = settings.enableCloudEngine;
+    final isConfigured = settings.isCloudConfigured;
+    final connState = AIExtractorService.cloudConnectionState;
+    final isConnected = connState == CloudConnectionState.connected;
+    final isTesting = connState == CloudConnectionState.testing;
+    final isError = connState == CloudConnectionState.error;
+
+    final statusColor = isConnected
+        ? appColors.tagWork
+        : (isTesting
+            ? appColors.tagStudy
+            : (isError ? context.colorScheme.error : appColors.textTertiary));
+
+    final String statusTitle;
+    if (isConnected) {
+      statusTitle = '引擎已就绪';
+    } else if (isTesting) {
+      statusTitle = '正在检测连接中...';
+    } else if (isError) {
+      statusTitle = '连接异常';
+    } else {
+      statusTitle = '引擎待命中';
+    }
+
+    final effectiveModel = AIExtractorService.getEffectiveCloudModel(
+      settings.cloudApiUrl,
+      settings.cloudModelName,
+    );
+    final latency = AIExtractorService.lastCloudLatencyMs;
+    final String statusSubtitle;
+    if (isConnected) {
+      statusSubtitle =
+          '当前模型: $effectiveModel · 网络通畅${latency != null ? " (${latency}ms)" : ""}';
+    } else if (isTesting) {
+      statusSubtitle = '正在检测 API 提供商网络通畅性...';
+    } else if (isError) {
+      statusSubtitle = AIExtractorService.cloudStatusDetail;
+    } else if (isConfigured) {
+      statusSubtitle = '当前模型: $effectiveModel · 点击测试连接';
+    } else {
+      statusSubtitle = '暂未配置 API 地址与密钥';
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSectionHeader(
+          title: '云端引擎',
+          infoKey: 'cloudOverviewGuide',
+          tooltip: '查看云端引擎说明',
+        ),
+        if (_expandedInfoKeys.contains('cloudOverviewGuide'))
+          _buildExpandedInfoBox(
+            '• 云端大模型推理：支持接入 OpenAI-Compatible 格式的云端大模型接口（DeepSeek、通义千问、OpenAI 等），提升超长复杂通知解析准确度。\n'
+            '• 隐私提醒与回退：启用后通知文本会发送至您配置的第三方 API 提供商；若云端超时或异常，系统将自动无缝回退至端侧引擎。',
+          ),
+        _buildGroupContainer(
+          children: [
+            // 1. 启动云端引擎 - 开关（首次点击弹出风险提示 Modal 窗）
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(Icons.cloud_outlined, color: primaryColor, size: 20),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '启动云端引擎',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: appColors.textPrimary,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '开启后优先调用 OpenAI 兼容云端大模型协同解析日程',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: appColors.textSecondary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Switch(
+                    key: const Key('cloud_engine_master_switch'),
+                    value: isCloudEnabled,
+                    onChanged: _handleCloudEngineSwitchChanged,
+                  ),
+                ],
+              ),
+            ),
+            _buildDivider(),
+
+            // 下方三栏在未开启「启动云端引擎」时统一置灰并禁用交互
+            Opacity(
+              opacity: isCloudEnabled ? 1.0 : 0.45,
+              child: IgnorePointer(
+                ignoring: !isCloudEnabled,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // 2. 服务管家 - 调出抽屉（填写 OpenAI-Compatible API 地址与 Key，拉取并收藏模型）
+                    _buildCompactParamTile(
+                      key: _paramCloudManagerKey,
+                      icon: Icons.dns_outlined,
+                      title: '服务管家',
+                      subtitle: '配置 OpenAI-Compatible 格式 API 地址与密钥',
+                      valueBadge: _getCloudManagerBadge(),
+                      enabled: isCloudEnabled,
+                      isEditing: _activeDrawerId == 'cloudServiceManager',
+                      onTap: isCloudEnabled
+                          ? () => _openCloudServiceManagerDrawer(primaryColor)
+                          : null,
+                    ),
+                    _buildDivider(),
+
+                    // 3. 选择模型 - 调出模型选择抽屉（草图结构：拉取列表 / 收藏 / 全部）
+                    _buildCompactParamTile(
+                      key: _paramCloudModelSelectKey,
+                      icon: Icons.model_training_outlined,
+                      title: '选择模型',
+                      subtitle: '从收藏或全部服务商模型列表中选用推理模型',
+                      valueBadge: _getCloudSelectedModelBadge(),
+                      enabled: isCloudEnabled,
+                      isEditing: _activeDrawerId == 'cloudModelSelector',
+                      onTap: isCloudEnabled
+                          ? () => _openCloudModelSelectorDrawer(primaryColor)
+                          : null,
+                    ),
+                    _buildDivider(),
+
+                    // 4. 云端模型状态（同端侧状态球机制与顺序，预热键改为测试连接按键）
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: Center(
+                              child: OverflowBox(
+                                maxWidth: 24,
+                                maxHeight: 24,
+                                child: Container(
+                                  width: 24,
+                                  height: 24,
+                                  alignment: Alignment.center,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: statusColor.withValues(
+                                      alpha: isConnected
+                                          ? 0.14
+                                          : (isTesting ? 0.12 : 0.06),
+                                    ),
+                                    border: Border.all(
+                                      color: statusColor,
+                                      width: 1.6,
+                                    ),
+                                    boxShadow: isConnected
+                                        ? [
+                                            BoxShadow(
+                                              color: statusColor.withValues(
+                                                  alpha: 0.45),
+                                              blurRadius: 6,
+                                              spreadRadius: 1,
+                                            ),
+                                          ]
+                                        : (isTesting
+                                            ? [
+                                                BoxShadow(
+                                                  color: statusColor.withValues(
+                                                      alpha: 0.35),
+                                                  blurRadius: 4,
+                                                  spreadRadius: 0.5,
+                                                ),
+                                              ]
+                                            : null),
+                                  ),
+                                  child: Icon(
+                                    Icons.cloud_done_outlined,
+                                    size: 13,
+                                    color: statusColor,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  statusTitle,
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: isCloudEnabled
+                                        ? appColors.textPrimary
+                                        : appColors.textTertiary,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 1),
+                                Text(
+                                  statusSubtitle,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: isCloudEnabled
+                                        ? appColors.textSecondary
+                                        : appColors.textTertiary,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          OutlinedButton.icon(
+                            onPressed: (isCloudEnabled && !isTesting)
+                                ? () => _handleTestCloudConnection()
+                                : null,
+                            icon: isTesting
+                                ? SizedBox(
+                                    width: 12,
+                                    height: 12,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 1.8,
+                                      color: primaryColor,
+                                    ),
+                                  )
+                                : Icon(
+                                    isConnected
+                                        ? Icons.wifi_tethering
+                                        : Icons.network_check,
+                                    size: 14,
+                                    color: isCloudEnabled
+                                        ? (isConnected
+                                            ? appColors.tagWork
+                                            : primaryColor)
+                                        : appColors.textTertiary,
+                                  ),
+                            label: Text(
+                              isTesting ? '测试中...' : '测试连接',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: isCloudEnabled
+                                    ? (isConnected
+                                        ? appColors.tagWork
+                                        : primaryColor)
+                                    : appColors.textTertiary,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              minimumSize: const Size(0, 30),
+                              side: BorderSide(
+                                color: isCloudEnabled
+                                    ? (isConnected
+                                        ? appColors.tagWork
+                                            .withValues(alpha: 0.5)
+                                        : primaryColor.withValues(alpha: 0.5))
+                                    : appColors.borderSubtle,
+                                width: 1,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _buildDivider(),
+
+                    // 4. 深度思考模式 - 开关按钮
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.psychology_outlined,
+                            color: isCloudEnabled
+                                ? primaryColor
+                                : appColors.textTertiary,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '深度思考模式',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: isCloudEnabled
+                                        ? appColors.textPrimary
+                                        : appColors.textTertiary,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '开启云端 Thinking 增强，提升复杂日程解析精准度',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: isCloudEnabled
+                                        ? appColors.textSecondary
+                                        : appColors.textTertiary,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Switch(
+                            key: const Key('cloud_think_mode_switch'),
+                            value: settings.enableCloudThinkMode,
+                            onChanged: isCloudEnabled
+                                ? (val) {
+                                    AppSettingsService.instance
+                                        .setEnableCloudThinkMode(val);
+                                    setState(() {});
+                                    _showSnack(
+                                      val
+                                          ? '已开启云端深度思考模式'
+                                          : '已关闭云端深度思考模式 (极速直出)',
+                                    );
+                                  }
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  String _getCloudManagerBadge() {
+    final settings = AppSettingsService.instance;
+    if (!settings.isCloudConfigured) return '未配置';
+    return '已配置';
+  }
+
+  String _getCloudSelectedModelBadge() {
+    final settings = AppSettingsService.instance;
+    final model = settings.cloudModelName.trim();
+    if (model.isEmpty || !settings.isFavoriteCloudModelAvailable(model)) {
+      return '未选择';
+    }
+    return model.length > 14 ? '${model.substring(0, 12)}..' : model;
+  }
+
+  Future<void> _handleCloudEngineSwitchChanged(bool val) async {
+    final settings = AppSettingsService.instance;
+    if (!val) {
+      settings.setEnableCloudEngine(false);
+      if (_activeDrawerId == 'cloudServiceManager' ||
+          _activeDrawerId == 'cloudModelSelector') {
+        _closeDrawer();
+      }
+      if (mounted) setState(() {});
+      widget.onStateRefreshed();
+      _showSnack('已关闭云端引擎，将使用端侧引擎处理日程');
+      return;
+    }
+
+    if (!settings.cloudRiskAccepted) {
+      final confirmed = await _showCloudRiskConfirmDialog();
+      if (confirmed != true) return;
+      settings.setCloudRiskAccepted(true);
+    }
+
+    settings.setEnableCloudEngine(true);
+    if (mounted) setState(() {});
+    widget.onStateRefreshed();
+    _showSnack(
+      settings.isCloudConfigured
+          ? '☁️ 已启用云端大模型引擎'
+          : '☁️ 已启用云端引擎，请点击服务管家填写 API 地址与密钥',
+    );
+  }
+
+  Future<bool?> _showCloudRiskConfirmDialog() {
+    final colors = context.appColors;
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.surfaceModal,
+        title: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: colors.tagStudy),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '启用云端引擎风险提示',
+                style: TextStyle(
+                  fontSize: 16.5,
+                  fontWeight: FontWeight.bold,
+                  color: colors.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          '开启云端大模型引擎后，待解析的通知文本与提示词将会通过网络发送至您所配置的第三方 OpenAI-Compatible API 服务提供商进行推理。\n\n'
+          '• 请勿上传涉密文件、密码或高度敏感的个人隐私信息；\n'
+          '• 请妥善保管您的 API Key 并留意服务商计费与速率限制；\n'
+          '• 随时关闭此开关即可恢复为纯端侧本地离线运行。',
+          style: TextStyle(
+            fontSize: 13,
+            height: 1.5,
+            color: colors.textSecondary,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('知晓并开启'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<CloudConnectionTestResult> _handleTestCloudConnection({
+    StateSetter? updateDrawerState,
+    String? overrideUrl,
+    String? overrideKey,
+    String? overrideModel,
+  }) async {
+    final settings = AppSettingsService.instance;
+    final future = AIExtractorService.testCloudConnection(
+      apiUrl: overrideUrl ?? settings.cloudApiUrl,
+      apiKey: overrideKey ?? settings.cloudApiKey,
+      modelName: overrideModel ?? settings.cloudModelName,
+    );
+    if (mounted) setState(() {});
+    updateDrawerState?.call(() {});
+
+    final result = await future;
+    if (mounted) {
+      setState(() {});
+      updateDrawerState?.call(() {});
+      widget.onStateRefreshed();
+      _showSnack(
+        result.success ? '🟢 ${result.message}' : '⚠️ ${result.message}',
+      );
+    }
+    return result;
+  }
+
+  Future<CloudModelListFetchResult> _handleFetchCloudModels({
+    StateSetter? updateDrawerState,
+    String? overrideUrl,
+    String? overrideKey,
+    bool showToast = true,
+  }) async {
+    final settings = AppSettingsService.instance;
+    _isFetchingCloudModels = true;
+    if (mounted) setState(() {});
+    updateDrawerState?.call(() {});
+
+    final res = await AIExtractorService.fetchCloudModels(
+      apiUrl: overrideUrl ?? settings.cloudApiUrl,
+      apiKey: overrideKey ?? settings.cloudApiKey,
+    );
+
+    _isFetchingCloudModels = false;
+    if (res.success) {
+      AppSettingsService.instance.setFetchedCloudModels(res.models);
+    }
+
+    if (mounted) {
+      setState(() {});
+      updateDrawerState?.call(() {});
+      widget.onStateRefreshed();
+      if (showToast) {
+        _showSnack(res.success ? '🟢 ${res.message}' : '⚠️ ${res.message}');
+      }
+    }
+    return res;
+  }
+
+  void _openCloudServiceManagerDrawer(Color primaryColor) {
+    final settings = AppSettingsService.instance;
+    _cloudUrlController.text = settings.cloudApiUrl;
+    _cloudKeyController.text = settings.cloudApiKey;
+    _cloudDrawerFeedback = null;
+    _cloudDrawerFeedbackSuccess = false;
+    _cloudServiceStep = 0;
+    _isFavoriteDropdownExpanded = false;
+
+    _openCustomOptionDrawer(
+      drawerId: 'cloudServiceManager',
+      title: '云端服务管家',
+      subtitle: '配置 OpenAI-Compatible 格式 API 地址与密钥',
+      icon: Icons.dns_outlined,
+      anchorKey: _paramCloudManagerKey,
+      formBuilder: (ctx, setDrawerState, onClose) {
+        return _buildCloudServiceManagerForm(
+          primaryColor: primaryColor,
+          updateState: setDrawerState,
+          onClose: onClose,
+        );
+      },
+    );
+  }
+
+  /// 构建云端服务管家抽屉表单（两步式：第一步填服务商与 Key，第二步从 Dropdown 多选收藏模型）
+  Widget _buildCloudServiceManagerForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    if (_cloudServiceStep == 1) {
+      return _buildCloudServiceFavoriteStepForm(
+        primaryColor: primaryColor,
+        updateState: updateState,
+        onClose: onClose,
+      );
+    }
+
+    final colors = context.appColors;
+    final settings = AppSettingsService.instance;
+    final connState = AIExtractorService.cloudConnectionState;
+    final isConnected = connState == CloudConnectionState.connected;
+    final isTesting =
+        connState == CloudConnectionState.testing || _isFetchingCloudModels;
+    final isConfigured = settings.isCloudConfigured;
+    final effectiveModel = AIExtractorService.getEffectiveCloudModel(
+      _cloudUrlController.text,
+      settings.cloudModelName,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 1. 运行环境状态卡（与 ModelCenterView 顶部状态卡样式一致）
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: isConnected ? colors.tagWorkContainer : colors.surfaceLow,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isConnected
+                  ? colors.tagWork.withValues(alpha: 0.3)
+                  : colors.borderSubtle,
+              width: 0.8,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    isConnected ? Icons.check_circle : Icons.info_outline,
+                    size: 18,
+                    color: isConnected ? colors.tagWork : primaryColor,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      isConnected
+                          ? '云端引擎已连通 · 网络通畅'
+                          : (isConfigured
+                              ? '已保存云端接口配置，保存后将拉取可用模型'
+                              : '暂未配置云端 API，请在下方填写服务商地址与密钥'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: colors.textPrimary,
+                      ),
+                    ),
+                  ),
+                  if (isConfigured)
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      onPressed: isTesting
+                          ? null
+                          : () {
+                              _cloudUrlController.clear();
+                              _cloudKeyController.clear();
+                              updateState(() {
+                                _cloudDrawerFeedback = null;
+                              });
+                            },
+                      icon: Icon(Icons.cleaning_services_outlined,
+                          size: 14, color: primaryColor),
+                      label: Text(
+                        '清空',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: primaryColor,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              if (isConfigured) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    Chip(
+                      label: Text(
+                        '当前: $effectiveModel',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.bold,
+                          color: primaryColor,
+                        ),
+                      ),
+                      backgroundColor: primaryColor.withValues(alpha: 0.12),
+                      side: BorderSide(color: primaryColor, width: 0.8),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+
+        // 2. 常用兼容服务商预设（样式对齐端侧模型库标题与卡片）
+        Row(
+          children: [
+            Icon(Icons.cloud_queue_rounded, size: 16, color: primaryColor),
+            const SizedBox(width: 6),
+            Text(
+              '常用 OpenAI-Compatible 服务商',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+                color: colors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: _cloudProviderPresets.map((preset) {
+            final url = preset['url']!;
+            final isSelected = _cloudUrlController.text.trim() == url;
+            return InkWell(
+              onTap: () {
+                updateState(() {
+                  _cloudUrlController.text = url;
+                  _cloudDrawerFeedback = null;
+                });
+              },
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? primaryColor.withValues(alpha: 0.10)
+                      : colors.surfaceLow,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isSelected
+                        ? primaryColor.withValues(alpha: 0.7)
+                        : colors.borderSubtle,
+                    width: isSelected ? 1.3 : 0.8,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      preset['name']!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: isSelected ? primaryColor : colors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      preset['tag']!,
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 14),
+
+        // 3. API 凭据填写卡片（与 ModelCenterView 卡片容器风格一致）
+        Row(
+          children: [
+            Icon(Icons.vpn_key_outlined, size: 16, color: primaryColor),
+            const SizedBox(width: 6),
+            Text(
+              'OpenAI-Compatible 接口凭据',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+                color: colors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.borderSubtle, width: 0.8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                key: const Key('cloud_api_url_field'),
+                controller: _cloudUrlController,
+                keyboardType: TextInputType.url,
+                style: TextStyle(fontSize: 13, color: colors.textPrimary),
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: 'API 地址 (OpenAI-Compatible)',
+                  hintText: 'https://api.deepseek.com/v1',
+                  helperText: '支持基础路径（自动补全 /models 与 /chat/completions）',
+                  helperMaxLines: 2,
+                  filled: true,
+                  fillColor: colors.surfaceCard,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: colors.borderSubtle),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: colors.borderSubtle),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('cloud_api_key_field'),
+                controller: _cloudKeyController,
+                obscureText: _obscureCloudKey,
+                style: TextStyle(fontSize: 13, color: colors.textPrimary),
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: 'API Key',
+                  hintText: 'sk-...',
+                  filled: true,
+                  fillColor: colors.surfaceCard,
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscureCloudKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      size: 18,
+                      color: colors.textSecondary,
+                    ),
+                    tooltip: _obscureCloudKey ? '显示密钥' : '隐藏密钥',
+                    onPressed: () {
+                      updateState(() {
+                        _obscureCloudKey = !_obscureCloudKey;
+                      });
+                    },
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: colors.borderSubtle),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: colors.borderSubtle),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        if (_cloudDrawerFeedback != null) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: BoxDecoration(
+              color: _cloudDrawerFeedbackSuccess
+                  ? colors.tagWorkContainer
+                  : colors.errorContainer,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _cloudDrawerFeedbackSuccess
+                    ? colors.tagWork.withValues(alpha: 0.4)
+                    : context.colorScheme.error.withValues(alpha: 0.4),
+              ),
+            ),
+            child: Text(
+              _cloudDrawerFeedback!,
+              style: TextStyle(
+                fontSize: 12,
+                color: _cloudDrawerFeedbackSuccess
+                    ? colors.tagWork
+                    : context.colorScheme.error,
+              ),
+            ),
+          ),
+        ],
+        const SizedBox(height: 20),
+
+        // 4. 抽屉底部操作按键：“取消”与“保存并测试”（成功后自动拉取模型列表并进入下一页）
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: isTesting ? null : onClose,
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: const Text('取消'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 2,
+              child: FilledButton.icon(
+                onPressed: isTesting
+                    ? null
+                    : () async {
+                        final apiUrl = _cloudUrlController.text.trim();
+                        final apiKey = _cloudKeyController.text.trim();
+
+                        if (apiUrl.isEmpty || apiKey.isEmpty) {
+                          updateState(() {
+                            _cloudDrawerFeedbackSuccess = false;
+                            _cloudDrawerFeedback =
+                                '请完整填写 OpenAI-Compatible API 地址与 API Key';
+                          });
+                          _showSnack('请先填写 API 地址与 API Key');
+                          return;
+                        }
+
+                        AppSettingsService.instance.setCloudServiceConfig(
+                          apiUrl: apiUrl,
+                          apiKey: apiKey,
+                        );
+
+                        updateState(() {
+                          _cloudDrawerFeedback = null;
+                        });
+
+                        final res = await _handleFetchCloudModels(
+                          updateDrawerState: updateState,
+                          overrideUrl: apiUrl,
+                          overrideKey: apiKey,
+                        );
+
+                        if (res.success) {
+                          updateState(() {
+                            _cloudServiceStep = 1;
+                            _isFavoriteDropdownExpanded = false;
+                            _cloudDrawerFeedback = null;
+                          });
+                        } else {
+                          updateState(() {
+                            _cloudDrawerFeedbackSuccess = false;
+                            _cloudDrawerFeedback = res.message;
+                          });
+                        }
+                      },
+                icon: isTesting
+                    ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: context.colorScheme.onPrimary,
+                        ),
+                      )
+                    : const Icon(Icons.network_check, size: 18),
+                label: Text(isTesting ? '拉取模型中...' : '保存并测试'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// 云端服务管家第二页：从 Dropdown 下拉多选要收藏的模型
+  Widget _buildCloudServiceFavoriteStepForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    final colors = context.appColors;
+    final settings = AppSettingsService.instance;
+    final fetchedModels = settings.fetchedCloudModels;
+    final favorites = settings.favoriteCloudModels;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 顶部状态提示卡
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: colors.tagWorkContainer,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: colors.tagWork.withValues(alpha: 0.35),
+              width: 0.8,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.check_circle, size: 18, color: colors.tagWork),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  fetchedModels.isNotEmpty
+                      ? '已拉取到 ${fetchedModels.length} 个模型，请从下方下拉框勾选需要收藏的模型（可多选）'
+                      : '接口连接成功，但服务商当前未返回可选模型',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: colors.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        Row(
+          children: [
+            Icon(Icons.star_outline_rounded, size: 16, color: primaryColor),
+            const SizedBox(width: 6),
+            Text(
+              '收藏常用模型（可多选）',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+                color: colors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        // 可多选 Dropdown 选择框
+        InkWell(
+          key: const Key('cloud_favorite_models_dropdown'),
+          onTap: fetchedModels.isEmpty
+              ? null
+              : () {
+                  updateState(() {
+                    _isFavoriteDropdownExpanded = !_isFavoriteDropdownExpanded;
+                  });
+                },
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            decoration: BoxDecoration(
+              color: colors.surfaceLow,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _isFavoriteDropdownExpanded
+                    ? primaryColor
+                    : colors.borderSubtle,
+                width: _isFavoriteDropdownExpanded ? 1.2 : 0.8,
+              ),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    favorites.isEmpty
+                        ? '点击展开下拉列表选择收藏模型'
+                        : '已收藏 ${favorites.length} 个模型：${favorites.join("、")}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: favorites.isEmpty
+                          ? colors.textSecondary
+                          : colors.textPrimary,
+                      fontWeight: favorites.isEmpty
+                          ? FontWeight.normal
+                          : FontWeight.w600,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  _isFavoriteDropdownExpanded
+                      ? Icons.arrow_drop_up_rounded
+                      : Icons.arrow_drop_down_rounded,
+                  color: primaryColor,
+                  size: 22,
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        if (_isFavoriteDropdownExpanded && fetchedModels.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Container(
+            decoration: BoxDecoration(
+              color: colors.surfaceCard,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: colors.borderSubtle, width: 0.9),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (int i = 0; i < fetchedModels.length; i++) ...[
+                  if (i > 0) _buildDivider(),
+                  InkWell(
+                    key: Key('dropdown_fav_item_${fetchedModels[i]}'),
+                    onTap: () {
+                      AppSettingsService.instance
+                          .toggleFavoriteCloudModel(fetchedModels[i]);
+                      updateState(() {});
+                      if (mounted) setState(() {});
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      child: Row(
+                        children: [
+                          Checkbox(
+                            value: favorites.contains(fetchedModels[i]),
+                            visualDensity: VisualDensity.compact,
+                            onChanged: (_) {
+                              AppSettingsService.instance
+                                  .toggleFavoriteCloudModel(fetchedModels[i]);
+                              updateState(() {});
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              fetchedModels[i],
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: favorites.contains(fetchedModels[i])
+                                    ? primaryColor
+                                    : colors.textPrimary,
+                                fontWeight:
+                                    favorites.contains(fetchedModels[i])
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+
+        if (favorites.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: favorites.map((modelId) {
+              return InputChip(
+                label: Text(
+                  modelId,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: primaryColor,
+                  ),
+                ),
+                backgroundColor: primaryColor.withValues(alpha: 0.12),
+                side: BorderSide(color: primaryColor.withValues(alpha: 0.5)),
+                visualDensity: VisualDensity.compact,
+                deleteIcon: Icon(Icons.close, size: 14, color: primaryColor),
+                onDeleted: () {
+                  AppSettingsService.instance.removeFavoriteCloudModel(modelId);
+                  updateState(() {});
+                  if (mounted) setState(() {});
+                },
+              );
+            }).toList(),
+          ),
+        ],
+
+        const SizedBox(height: 20),
+
+        // 底部按键：上一步 与 完成
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () {
+                  updateState(() {
+                    _cloudServiceStep = 0;
+                    _isFavoriteDropdownExpanded = false;
+                  });
+                },
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: const Text('上一步'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 2,
+              child: FilledButton.icon(
+                onPressed: () {
+                  final curModel = settings.cloudModelName.trim();
+                  if ((curModel.isEmpty ||
+                          !settings.isFavoriteCloudModelAvailable(curModel)) &&
+                      favorites.isNotEmpty) {
+                    final firstAvailable = favorites.firstWhere(
+                      (m) => settings.isFavoriteCloudModelAvailable(m),
+                      orElse: () => '',
+                    );
+                    if (firstAvailable.isNotEmpty) {
+                      AppSettingsService.instance
+                          .setCloudModelName(firstAvailable);
+                    }
+                  }
+                  if (mounted) setState(() {});
+                  widget.onStateRefreshed();
+                  onClose();
+                  _showSnack('✅ 已保存云端服务与收藏模型');
+                },
+                icon: const Icon(Icons.check, size: 18),
+                label: const Text('完成'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _openCloudModelSelectorDrawer(Color primaryColor) {
+    _openCustomOptionDrawer(
+      drawerId: 'cloudModelSelector',
+      title: '模型选择',
+      subtitle: '管理收藏模型或从全部列表中选用',
+      icon: Icons.model_training_outlined,
+      anchorKey: _paramCloudModelSelectKey,
+      formBuilder: (ctx, setDrawerState, onClose) {
+        return _buildCloudModelSelectorForm(
+          primaryColor: primaryColor,
+          updateState: setDrawerState,
+          onClose: onClose,
+        );
+      },
+    );
+  }
+
+  /// 构建「模型选择」抽屉表单（严格对照草图：拉取模型列表按钮 + 收藏分组 + 全部分组）
+  Widget _buildCloudModelSelectorForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    final colors = context.appColors;
+    final settings = AppSettingsService.instance;
+    final favorites = settings.favoriteCloudModels;
+    final allModels = settings.fetchedCloudModels;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 1. 顶部通栏按钮：[ 拉取模型列表 ↻ ]
+        OutlinedButton(
+          key: const Key('fetch_cloud_models_button'),
+          onPressed: _isFetchingCloudModels
+              ? null
+              : () async {
+                  if (!settings.isCloudConfigured) {
+                    _showSnack('请先在“服务管家”中配置 API 地址与密钥');
+                    return;
+                  }
+                  await _handleFetchCloudModels(updateDrawerState: updateState);
+                },
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            backgroundColor: colors.surfaceLow,
+            side: BorderSide(color: colors.borderSubtle, width: 1.0),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                _isFetchingCloudModels ? '正在拉取模型列表...' : '拉取模型列表',
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: colors.textPrimary,
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (_isFetchingCloudModels)
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: primaryColor,
+                  ),
+                )
+              else
+                Icon(
+                  Icons.refresh_rounded,
+                  size: 18,
+                  color: primaryColor,
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // 2. 「收藏」分区
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            '收藏',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: colors.textSecondary,
+            ),
+          ),
+        ),
+        Container(
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: colors.borderSubtle, width: 1.0),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: favorites.isEmpty
+              ? Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                  child: Text(
+                    '暂无收藏模型，可从下方“全部”列表中点击 + 加入收藏',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.textTertiary,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (int i = 0; i < favorites.length; i++) ...[
+                      if (i > 0) _buildDivider(),
+                      _buildFavoriteModelRow(
+                        modelId: favorites[i],
+                        isAvailable:
+                            settings.isFavoriteCloudModelAvailable(favorites[i]),
+                        isSelected: settings.isFavoriteCloudModelAvailable(
+                                favorites[i]) &&
+                            settings.cloudModelName == favorites[i],
+                        primaryColor: primaryColor,
+                        updateState: updateState,
+                      ),
+                    ],
+                  ],
+                ),
+        ),
+        const SizedBox(height: 18),
+
+        // 3. 「全部」分区
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            '全部',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: colors.textSecondary,
+            ),
+          ),
+        ),
+        Container(
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: colors.borderSubtle, width: 1.0),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: allModels.isEmpty
+              ? Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                  child: Text(
+                    '暂未拉取到模型列表，请点击上方“拉取模型列表”',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.textTertiary,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (int i = 0; i < allModels.length; i++) ...[
+                      if (i > 0) _buildDivider(),
+                      _buildAllModelRow(
+                        modelId: allModels[i],
+                        isFavorited: favorites.contains(allModels[i]),
+                        isSelected: settings.cloudModelName == allModels[i],
+                        primaryColor: primaryColor,
+                        updateState: updateState,
+                      ),
+                    ],
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// 「收藏」区单行：可用时点击空白处选用（显示 ✓）；失效时整行置灰不可点击，仅右侧垃圾桶按钮可点按
+  Widget _buildFavoriteModelRow({
+    required String modelId,
+    required bool isAvailable,
+    required bool isSelected,
+    required Color primaryColor,
+    required StateSetter updateState,
+  }) {
+    final colors = context.appColors;
+    return AnimatedContainer(
+      key: Key('fav_model_row_$modelId'),
+      duration: const Duration(milliseconds: 160),
+      color: isSelected
+          ? primaryColor.withValues(alpha: 0.08)
+          : Colors.transparent,
+      child: Row(
+        children: [
+          Expanded(
+            child: Opacity(
+              opacity: isAvailable ? 1.0 : 0.42,
+              child: InkWell(
+                key: Key('fav_select_$modelId'),
+                onTap: isAvailable
+                    ? () {
+                        AppSettingsService.instance.setCloudModelName(modelId);
+                        updateState(() {});
+                        if (mounted) setState(() {});
+                        widget.onStateRefreshed();
+                        _showSnack('✅ 已选用云端模型：$modelId');
+                      }
+                    : null,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          modelId,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight:
+                                isSelected ? FontWeight.bold : FontWeight.w500,
+                            color: !isAvailable
+                                ? colors.textTertiary
+                                : (isSelected
+                                    ? primaryColor
+                                    : colors.textPrimary),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (isSelected) ...[
+                        const SizedBox(width: 8),
+                        Icon(
+                          Icons.check_rounded,
+                          size: 18,
+                          color: primaryColor,
+                        ),
+                      ] else if (!isAvailable) ...[
+                        const SizedBox(width: 8),
+                        Text(
+                          '已下线',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: colors.textTertiary,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            key: Key('fav_delete_$modelId'),
+            icon: Icon(
+              Icons.delete_outline_rounded,
+              size: 18,
+              color: colors.textSecondary,
+            ),
+            tooltip: '移出收藏',
+            visualDensity: VisualDensity.compact,
+            onPressed: () {
+              AppSettingsService.instance.removeFavoriteCloudModel(modelId);
+              updateState(() {});
+              if (mounted) setState(() {});
+              widget.onStateRefreshed();
+            },
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+    );
+  }
+
+  /// 「全部」区单行：点击空白处直接选用；右侧 + 键加入收藏（变成 - 键，再次按下移出收藏）
+  Widget _buildAllModelRow({
+    required String modelId,
+    required bool isFavorited,
+    required bool isSelected,
+    required Color primaryColor,
+    required StateSetter updateState,
+  }) {
+    final colors = context.appColors;
+    return AnimatedContainer(
+      key: Key('all_model_row_$modelId'),
+      duration: const Duration(milliseconds: 160),
+      color: isSelected
+          ? primaryColor.withValues(alpha: 0.08)
+          : Colors.transparent,
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              key: Key('all_select_$modelId'),
+              onTap: () {
+                AppSettingsService.instance.setCloudModelName(modelId);
+                updateState(() {});
+                if (mounted) setState(() {});
+                widget.onStateRefreshed();
+                _showSnack('✅ 已选用云端模型：$modelId');
+              },
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        modelId,
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          fontWeight:
+                              isSelected ? FontWeight.bold : FontWeight.w500,
+                          color: isSelected ? primaryColor : colors.textPrimary,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (isSelected) ...[
+                      const SizedBox(width: 8),
+                      Icon(
+                        Icons.check_rounded,
+                        size: 18,
+                        color: primaryColor,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            key: Key('all_fav_toggle_$modelId'),
+            icon: Icon(
+              isFavorited ? Icons.remove_rounded : Icons.add_rounded,
+              size: 20,
+              color: isFavorited ? colors.tagLife : primaryColor,
+            ),
+            tooltip: isFavorited ? '从收藏中移除' : '加入收藏',
+            visualDensity: VisualDensity.compact,
+            onPressed: () {
+              AppSettingsService.instance.toggleFavoriteCloudModel(modelId);
+              updateState(() {});
+              if (mounted) setState(() {});
+              widget.onStateRefreshed();
+            },
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
     );
   }
@@ -2654,6 +4303,24 @@ class _SettingsPageState extends State<SettingsPage> {
             updateState: setDrawerState,
             onClose: _closeDrawer,
           );
+        } else if (_activeDrawerId == 'cloudServiceManager') {
+          drawerTitle = '云端服务管家';
+          drawerSubtitle = '配置 OpenAI-Compatible 格式 API 地址与密钥';
+          drawerIcon = Icons.dns_outlined;
+          formContent = _buildCloudServiceManagerForm(
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'cloudModelSelector') {
+          drawerTitle = '模型选择';
+          drawerSubtitle = '管理收藏模型或从全部列表中选用';
+          drawerIcon = Icons.model_training_outlined;
+          formContent = _buildCloudModelSelectorForm(
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
         } else if (_activeDrawerId == 'modelManager') {
           drawerTitle = '端侧模型管家';
           drawerSubtitle = '管理本地离线模型与在线极速下载';
@@ -3116,6 +4783,7 @@ class _SettingsPageState extends State<SettingsPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KeyedSubtree(key: _themeKey, child: _buildThemeSection()),
+        KeyedSubtree(key: _cloudKey, child: _buildCloudEngineSection()),
         KeyedSubtree(key: _modelKey, child: _buildModelEngineSection()),
         if (Platform.isAndroid)
           KeyedSubtree(

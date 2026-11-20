@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>知程 (Anno2Agenda) — 作品介绍文档</title>
+  <style>
+    :root {
+      --text-primary: #111827;
+      --text-secondary: #374151;
+      --text-muted: #6b7280;
+      --border-color: #d1d5db;
+      --border-strong: #9ca3af;
+      --accent-color: #1e3a8a;
+      --accent-light: #eff6ff;
+      --bg-subtle: #f9fafb;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    body {
+      background-color: #e5e7eb;
+      color: var(--text-primary);
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.68;
+      padding: 28px 0 48px;
+    }
+
+    /* 顶部非打印操作栏 */
+    .print-toolbar {
+      max-width: 210mm;
+      margin: 0 auto 16px;
+      padding: 10px 18px;
+      background: #ffffff;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    }
+
+    .print-toolbar-tip {
+      font-size: 9.5pt;
+      color: var(--text-secondary);
+    }
+
+    .btn-print {
+      padding: 7px 18px;
+      background-color: var(--accent-color);
+      color: #ffffff;
+      border: none;
+      border-radius: 4px;
+      font-size: 9.5pt;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-print:hover {
+      background-color: #172554;
+    }
+
+    /* A4 纸张容器 */
+    .document-page {
+      width: 210mm;
+      max-width: 100%;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 18mm 20mm;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+    }
+
+    /* 文档头部 */
+    .doc-header {
+      border-bottom: 2px solid var(--accent-color);
+      padding-bottom: 14px;
+      margin-bottom: 20px;
+    }
+
+    .doc-type-label {
+      font-size: 9pt;
+      font-weight: 600;
+      color: var(--accent-color);
+      letter-spacing: 1.5px;
+      margin-bottom: 4px;
+    }
+
+    .doc-title {
+      font-size: 20pt;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: 0.5px;
+      line-height: 1.3;
+    }
+
+    .doc-subtitle {
+      font-size: 11pt;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      font-weight: 500;
+    }
+
+    .doc-meta-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px 16px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      font-size: 9pt;
+      color: var(--text-secondary);
+    }
+
+    .doc-meta-item strong {
+      color: var(--text-primary);
+    }
+
+    /* 章节标题 */
+    .section {
+      margin-bottom: 20px;
+    }
+
+    .section-title {
+      font-size: 13.5pt;
+      font-weight: 700;
+      color: var(--accent-color);
+      border-left: 4px solid var(--accent-color);
+      padding-left: 10px;
+      margin-bottom: 10px;
+      line-height: 1.35;
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+
+    .sub-title {
+      font-size: 11pt;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin: 12px 0 6px;
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+
+    p {
+      margin-bottom: 8px;
+      text-align: justify;
+      color: var(--text-secondary);
+    }
+
+    ul, ol {
+      margin: 6px 0 10px 20px;
+      color: var(--text-secondary);
+    }
+
+    li {
+      margin-bottom: 5px;
+      text-align: justify;
+    }
+
+    li strong {
+      color: var(--text-primary);
+    }
+
+    code {
+      font-family: "Consolas", "JetBrains Mono", "Courier New", monospace;
+      font-size: 9pt;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      padding: 1px 4px;
+      border-radius: 3px;
+      color: #1f2937;
+    }
+
+    /* 表格样式 */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 14px;
+      font-size: 9.2pt;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    th, td {
+      border: 1px solid var(--border-strong);
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+      line-height: 1.5;
+    }
+
+    th {
+      background-color: var(--accent-light);
+      color: var(--accent-color);
+      font-weight: 700;
+    }
+
+    td {
+      color: var(--text-secondary);
+    }
+
+    /* 架构图框 */
+    .arch-diagram-box {
+      border: 1px solid var(--border-strong);
+      background: #ffffff;
+      padding: 12px;
+      margin: 10px 0 14px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    .arch-caption {
+      font-size: 8.8pt;
+      color: var(--text-muted);
+      text-align: center;
+      margin-top: 6px;
+    }
+
+    /* 创新点与场景卡片网格 */
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 8px 0 12px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    .info-box {
+      border: 1px solid var(--border-color);
+      background: var(--bg-subtle);
+      padding: 10px 12px;
+    }
+
+    .info-box-title {
+      font-size: 10pt;
+      font-weight: 700;
+      color: var(--accent-color);
+      margin-bottom: 4px;
+    }
+
+    .info-box-desc {
+      font-size: 9.2pt;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      margin-bottom: 0;
+    }
+
+    /* 页脚 */
+    .doc-footer {
+      margin-top: 24px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      font-size: 8.5pt;
+      color: var(--text-muted);
+    }
+
+    /* 打印专用规则 */
+    @page {
+      size: A4 portrait;
+      margin: 15mm 18mm;
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+        padding: 0;
+      }
+
+      .no-print {
+        display: none !important;
+      }
+
+      .document-page {
+        width: 100%;
+        padding: 0;
+        margin: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部打印控制条（打印时自动隐藏） -->
+  <div class="print-toolbar no-print">
+    <div class="print-toolbar-tip">
+      打印提示：点击右侧按钮或按 Ctrl+P，目标打印机选择“另存为 PDF”，建议取消勾选“页眉和页脚”，勾选“背景图形”。
+    </div>
+    <button class="btn-print" onclick="window.print()">打印 / 导出为 PDF</button>
+  </div>
+
+  <main class="document-page">
+    <!-- 文档标题区 -->
+    <header class="doc-header">
+      <div class="doc-type-label">项目作品介绍书 / 架构说明文档</div>
+      <h1 class="doc-title">知程 (Anno2Agenda)</h1>
+      <div class="doc-subtitle">基于 Flutter 与端侧大模型的跨平台无感通知转日程与算力协同系统</div>
+      <div class="doc-meta-grid">
+        <div class="doc-meta-item"><strong>目标平台：</strong>Android / Windows</div>
+        <div class="doc-meta-item"><strong>核心框架：</strong>Flutter + llama.cpp (FFI)</div>
+        <div class="doc-meta-item"><strong>端侧模型：</strong>Qwen3.5 GGUF + 中文规则引擎</div>
+        <div class="doc-meta-item"><strong>文字采集：</strong>无障碍节点树直读 + ML Kit OCR</div>
+        <div class="doc-meta-item"><strong>跨端通信：</strong>局域网 HTTP 协同 (Port 9527)</div>
+        <div class="doc-meta-item"><strong>运行特性：</strong>全离线可用 / 数据不出内网</div>
+      </div>
+    </header>
+
+    <!-- 一、项目背景 -->
+    <section class="section">
+      <h2 class="section-title">一、项目背景与问题提出</h2>
+      <p>
+        在日常学习、科研与办公场景中，各类通知公告高度碎片化地分布在即时通讯群聊（微信、QQ、飞书、企业微信）、高校教务网站、电子邮件、公众号推文、线下活动海报以及长达数小时的线上视频会议速记中。面对高频、多源、非结构化的繁杂通知，用户在将其转化为个人日程管理时普遍面临以下四个核心痛点：
+      </p>
+      <ol>
+        <li>
+          <strong>跨应用手动录入极度繁琐、效率低下：</strong>用户需要在聊天软件或网页与系统日历之间反复切换窗口，逐字核对并手动输入事项名称、起止时间、会议室地点及待办要求。操作链路冗长，极易在繁杂消息轰炸中遗漏关键时间节点。
+        </li>
+        <li>
+          <strong>传统正则表达式与规则引擎机械截断、准确率低：</strong>现有部分日程提取工具依赖固定正则表达式匹配。当遇到带有语境转折、变更通知或复杂修饰的文本（例如：“原定于周三下午3点在科技楼402的组会，因临时检查推迟到本周五下午2点半改在逸夫楼B305举行”）时，规则引擎往往机械截取第一个作废时间或截断残缺地点，导致生成的日程严重失真。
+        </li>
+        <li>
+          <strong>云端大模型方案存在隐私合规风险与网络依赖：</strong>若将内部会议纪要、未公开科研课题通知或个人行程上传至第三方公有云大模型 API 进行解析，不仅需要持续消耗商业 Token 费用，更存在敏感数据外泄风险，且在弱网或离线环境下完全失效。
+        </li>
+        <li>
+          <strong>移动端直接处理超长文本易触发内存溢出 (OOM)：</strong>手机端可用运行内存（RAM）与散热受限，当直接将数万字的视频会议全场字幕或长篇教务公文输入手机本地大模型时，KV Cache 显存占用急剧飙升，极易引发推理进程崩溃或系统卡死。
+        </li>
+      </ol>
+      <p>
+        针对上述问题，本项目设计并实现了<strong>“知程 (Anno2Agenda)”</strong>——一款完全运行于终端本地、兼顾深度语义理解与跨端算力互助的无感通知转日程系统，实现从“看到通知”到“静默写入系统日历并设置提醒”的闭环体验。
+      </p>
+    </section>
+
+    <!-- 二、技术架构 -->
+    <section class="section">
+      <h2 class="section-title">二、系统技术架构</h2>
+      <p>
+        系统整体采用<strong>“Flutter 跨平台统一业务层 + 原生平台桥接采集层 + llama.cpp 端侧混合推理层 + 局域网跨端算力互助层”</strong>的四层架构设计，同时支持 Android 移动端与 Windows 桌面端原生编译运行。
+      </p>
+
+      <!-- 纯矢量 SVG 架构图 -->
+      <div class="arch-diagram-box">
+        <svg viewBox="0 0 820 300" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg" style="font-family: 'Microsoft YaHei', sans-serif;">
+          <!-- 背景分层框 -->
+          <rect x="10" y="10" width="185" height="280" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2" rx="4" />
+          <text x="102" y="32" font-size="12" font-weight="bold" fill="#1e3a8a" text-anchor="middle">1. 多源无感采集层</text>
+
+          <rect x="215" y="10" width="195" height="280" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2" rx="4" />
+          <text x="312" y="32" font-size="12" font-weight="bold" fill="#1e3a8a" text-anchor="middle">2. Flutter 跨平台核心层</text>
+
+          <rect x="430" y="10" width="195" height="280" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2" rx="4" />
+          <text x="527" y="32" font-size="12" font-weight="bold" fill="#1e3a8a" text-anchor="middle">3. 端侧混合推理与协同层</text>
+
+          <rect x="645" y="10" width="165" height="280" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2" rx="4" />
+          <text x="727" y="32" font-size="12" font-weight="bold" fill="#1e3a8a" text-anchor="middle">4. 日历闭环与提醒层</text>
+
+          <!-- 第1层节点 -->
+          <rect x="24" y="50" width="157" height="46" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="102" y="70" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">Android 无障碍 0ms 读屏</text>
+          <text x="102" y="86" font-size="9" fill="#4b5563" text-anchor="middle">AccessibilityNodeInfo 节点树</text>
+
+          <rect x="24" y="110" width="157" height="46" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="102" y="130" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">静默截屏 + 离线中文 OCR</text>
+          <text x="102" y="146" font-size="9" fill="#4b5563" text-anchor="middle">takeScreenshot + ML Kit</text>
+
+          <rect x="24" y="170" width="157" height="46" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="102" y="190" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">全局贴边悬浮窗 / 系统划词</text>
+          <text x="102" y="206" font-size="9" fill="#4b5563" text-anchor="middle">WindowManager / PROCESS_TEXT</text>
+
+          <rect x="24" y="230" width="157" height="46" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="102" y="250" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">Windows 桌面长文/字幕输入</text>
+          <text x="102" y="266" font-size="9" fill="#4b5563" text-anchor="middle">剪贴板监听与批量文本导入</text>
+
+          <!-- 第2层节点 -->
+          <rect x="229" y="55" width="167" height="54" fill="#eff6ff" stroke="#1e3a8a" rx="3" />
+          <text x="312" y="77" font-size="10.5" font-weight="bold" fill="#1e3a8a" text-anchor="middle">响应式多端工作台 UI</text>
+          <text x="312" y="95" font-size="9" fill="#374151" text-anchor="middle">桌面三栏 / 平板双栏 / 移动单栏</text>
+
+          <rect x="229" y="126" width="167" height="54" fill="#eff6ff" stroke="#1e3a8a" rx="3" />
+          <text x="312" y="148" font-size="10.5" font-weight="bold" fill="#1e3a8a" text-anchor="middle">PlatformBridge 跨平台通信</text>
+          <text x="312" y="166" font-size="9" fill="#374151" text-anchor="middle">Flutter MethodChannel 桥接</text>
+
+          <rect x="229" y="197" width="167" height="75" fill="#eff6ff" stroke="#1e3a8a" rx="3" />
+          <text x="312" y="219" font-size="10.5" font-weight="bold" fill="#1e3a8a" text-anchor="middle">内置模型管家与任务调度</text>
+          <text x="312" y="237" font-size="9" fill="#374151" text-anchor="middle">ModelScope 断点续传下载</text>
+          <text x="312" y="253" font-size="9" fill="#374151" text-anchor="middle">本地生命周期管理与缓存清理</text>
+
+          <!-- 第3层节点 -->
+          <rect x="444" y="50" width="167" height="68" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5" rx="3" />
+          <text x="527" y="71" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">llama.cpp 端侧大模型引擎</text>
+          <text x="527" y="88" font-size="9" fill="#4b5563" text-anchor="middle">Android: Dart FFI + Vulkan 加速</text>
+          <text x="527" y="103" font-size="9" fill="#4b5563" text-anchor="middle">Qwen3.5-0.8B / 2B (GGUF Q4_K_M)</text>
+
+          <rect x="444" y="132" width="167" height="62" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5" rx="3" />
+          <text x="527" y="153" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">局域网跨端算力互助服务</text>
+          <text x="527" y="170" font-size="9" fill="#4b5563" text-anchor="middle">HTTP Port 9527 (/extract &amp; /sync)</text>
+          <text x="527" y="185" font-size="9" fill="#4b5563" text-anchor="middle">手机长文本推流 -&gt; PC 推理回传</text>
+
+          <rect x="444" y="208" width="167" height="68" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="527" y="229" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">0ms 中文时空语义规则引擎</text>
+          <text x="527" y="246" font-size="9" fill="#4b5563" text-anchor="middle">相对日期推算 / 农历节气转换</text>
+          <text x="527" y="261" font-size="9" fill="#4b5563" text-anchor="middle">作废时间过滤 / Checklist 提取</text>
+
+          <!-- 第4层节点 -->
+          <rect x="657" y="55" width="141" height="62" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="727" y="77" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">结构化 JSON 校验生成</text>
+          <text x="727" y="94" font-size="9" fill="#4b5563" text-anchor="middle">AgendaEvent 数据模型</text>
+          <text x="727" y="108" font-size="9" fill="#4b5563" text-anchor="middle">时间/地点/待办清单归一化</text>
+
+          <rect x="657" y="132" width="141" height="62" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="727" y="154" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">Android 日历静默直写</text>
+          <text x="727" y="171" font-size="9" fill="#4b5563" text-anchor="middle">CalendarContract 数据库</text>
+          <text x="727" y="185" font-size="9" fill="#4b5563" text-anchor="middle">自动配置 Reminders 闹钟</text>
+
+          <rect x="657" y="209" width="141" height="62" fill="#ffffff" stroke="#64748b" rx="3" />
+          <text x="727" y="231" font-size="10.5" font-weight="bold" fill="#111827" text-anchor="middle">Windows 标准日历导出</text>
+          <text x="727" y="248" font-size="9" fill="#4b5563" text-anchor="middle">RFC 5545 (.ics) + VALARM</text>
+          <text x="727" y="262" font-size="9" fill="#4b5563" text-anchor="middle">生态级同步手环/手表/灵动岛</text>
+
+          <!-- 连接箭头线 -->
+          <g stroke="#1e3a8a" stroke-width="1.5" fill="none">
+            <line x1="181" y1="155" x2="225" y2="155" />
+            <polygon points="225,151 231,155 225,159" fill="#1e3a8a" stroke="none" />
+
+            <line x1="396" y1="155" x2="440" y2="155" />
+            <polygon points="440,151 446,155 440,159" fill="#1e3a8a" stroke="none" />
+
+            <line x1="611" y1="155" x2="653" y2="155" />
+            <polygon points="653,151 659,155 653,159" fill="#1e3a8a" stroke="none" />
+          </g>
+        </svg>
+        <div class="arch-caption">图 1：知程 (Anno2Agenda) 跨平台系统分层技术架构图</div>
+      </div>
+
+      <h3 class="sub-title">（一）基于 Flutter 的跨平台统一架构与原生扩展</h3>
+      <p>
+        前端交互与核心调度逻辑基于 Flutter 框架构建，通过一套 Dart 核心代码库同时编译生成 Android 客户端与 Windows 桌面端原生可执行程序。针对不同终端的屏幕形态，界面层实现了自适应三栏（桌面宽屏）、双栏（平板/小窗）与单栏（手机端）布局。在 Android 侧，通过 <code>MethodChannel</code> 深度桥接 Kotlin 原生服务（<code>FloatingBubbleService</code> 与 <code>ScreenCaptureAccessibilityService</code>），将全局贴边悬浮窗、无障碍窗口节点遍历、Android 11+ 静默截屏与 Google ML Kit 离线中文 OCR 能力无缝注入 Flutter 业务流。
+      </p>
+
+      <h3 class="sub-title">（二）基于 llama.cpp 的端侧大模型运行框架与混合推理</h3>
+      <p>
+        为彻底摆脱云端 API 依赖，系统内嵌了基于 C/C++ 的高性能端侧推理框架 <code>llama.cpp</code>（支持 Qwen3.5 Gated DeltaNet 混合注意力架构与 Vulkan 移动端 GPU 硬件加速）：
+      </p>
+      <ul>
+        <li>
+          <strong>移动端直接推理：</strong>Android 端通过 Dart FFI 直接挂载量化后的 <code>Qwen3.5-0.8B (Q4_K_M, 约 530MB)</code> 或 <code>Qwen3.5-2B</code> GGUF 模型文件，并内置连接国内魔搭社区 (ModelScope) 直链的“模型管家”，支持断点续传下载、模型热切换与空间释放。
+        </li>
+        <li>
+          <strong>桌面端守护进程协同：</strong>Windows 端自动检测并静默拉起本地 <code>llama-server</code> 或 <code>Ollama</code> 守护进程，自动绕过系统全局代理直连本机回环接口，利用桌面级 CPU/GPU 提供高吞吐推理。
+        </li>
+        <li>
+          <strong>双引擎协同与确定性兜底：</strong>系统内置一套零延迟中文时空语义规则引擎（<code>AiExtractorService</code>）。大模型负责复杂语境消歧、改期通知过滤与 JSON 结构化生成；规则引擎提供精确的相对日期换算（如“下周三”“本周日晚8点”）、农历转换及毫秒级离线兜底。
+        </li>
+      </ul>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 22%;">核心模块</th>
+            <th style="width: 28%;">对应工程源码实现</th>
+            <th style="width: 50%;">关键技术实现与职责说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>端侧混合推理服务</td>
+            <td><code>lib/services/ai_extractor_service.dart</code></td>
+            <td>封装 Android 端 <code>LlamaController</code> (llama.cpp FFI) 与桌面端本地推理接口；结合中文时空规则引擎，输出严格符合 Schema 的结构化日程 JSON。</td>
+          </tr>
+          <tr>
+            <td>模型生命周期管家</td>
+            <td><code>lib/services/local_model_manager.dart</code></td>
+            <td>管理 GGUF 模型的 HTTP Range 断点续传下载、文件完整性校验、模型挂载激活及未完成 <code>.part</code> 缓存清理。</td>
+          </tr>
+          <tr>
+            <td>局域网算力协同与同步</td>
+            <td><code>lib/services/lan_sync_service.dart</code></td>
+            <td>基于端口 <code>9527</code> 构建轻量级内网 HTTP 服务，提供 <code>/extract</code>（手机投喂长文、电脑推理回传）与 <code>/sync</code>（双端日程去重合并）接口。</td>
+          </tr>
+          <tr>
+            <td>零跳转全局悬浮窗与采集</td>
+            <td><code>FloatingBubbleService.kt</code><br/><code>ScreenCaptureAccessibilityService.kt</code></td>
+            <td>实现贴边悬浮胶囊原地展开操作卡；通过 <code>AccessibilityNodeInfo</code> 0ms 提取屏幕文本，或隐藏悬浮窗静默截屏交由 ML Kit 离线 OCR 识别。</td>
+          </tr>
+          <tr>
+            <td>系统日历闭环写入</td>
+            <td><code>CalendarWriterHelper.kt</code><br/><code>lib/models/agenda_event.dart</code></td>
+            <td>Android 端通过 <code>CalendarContract</code> 静默直写系统日历数据库并配置提醒闹钟；Windows 端生成标准 <code>RFC 5545 (.ics)</code> 文件并唤起系统日历导入。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 三、应用场景 -->
+    <section class="section">
+      <h2 class="section-title">三、核心应用场景</h2>
+      <div class="grid-2col">
+        <div class="info-box">
+          <div class="info-box-title">1. 高校教务与课程变动通知处理</div>
+          <p class="info-box-desc">
+            面对教务系统、班级群中频繁发布的调课通知、考试安排、选课退补选截止时间及实验验收通知，学生在当前聊天页面点击贴边悬浮窗即可 0ms 提取屏幕文字，自动剔除“原定时间”等干扰信息，一键写入手机日历并设置提前半小时提醒。
+          </p>
+        </div>
+        <div class="info-box">
+          <div class="info-box-title">2. 学术讲座海报与竞赛活动报名</div>
+          <p class="info-box-desc">
+            针对微信公众号推文中的学术报告海报、校园招新或竞赛宣讲图片，由于无法直接复制文字，用户可通过悬浮窗触发“静默截屏 + 离线中文 OCR”，在本地完成图片文字识别与大模型结构化提取，自动归纳讲座时间、报告厅地点与签到要求。
+          </p>
+        </div>
+        <div class="info-box">
+          <div class="info-box-title">3. 超长视频会议字幕与研讨会速记提炼</div>
+          <p class="info-box-desc">
+            在长达数小时的线上学术研讨会或项目周会后，针对数万字的会议语音转写字幕，手机端可通过局域网算力协同机制将长文本推流至同一 Wi-Fi 下的 Windows 电脑端，由桌面端大模型快速提炼出多项关键截止日期与后续会议安排并回传手机。
+          </p>
+        </div>
+        <div class="info-box">
+          <div class="info-box-title">4. 涉密、内网与离线办公日程管理</div>
+          <p class="info-box-desc">
+            在实验室内部网络、政企内网或差旅飞行等断网场景下，系统无需连接任何外部云服务器即可完成从采集、OCR、LLM 推理到日历入库与双端局域网同步的全流程，并借助系统日历生态无缝联动手机灵动岛、智能手环与智能手表震动提醒。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 四、主要创新点 -->
+    <section class="section">
+      <h2 class="section-title">四、项目主要创新点</h2>
+      <ol>
+        <li>
+          <strong>端侧大模型 (LLM) 与中文时空规则双引擎混合架构：</strong>
+          突破了传统日程软件“纯正则规则死板易错”与“纯云端大模型高延迟、重网络”的两难局限。通过端侧 <code>Qwen3.5</code> GGUF 模型深度理解复杂通知中的改期、顺延、条件转折与携带物品清单（Checklist），再配合 0ms 中文时空语义规则引擎校准相对日期与节假日，兼顾了语义高准确率与毫秒级响应速度。
+        </li>
+        <li>
+          <strong>局域网跨端算力互助机制（手机投喂、电脑推理）：</strong>
+          创新性地设计了基于内网端口 <code>9527</code> 的端侧算力协同协议（<code>/extract</code>）。当手机端面对数万字超长会议字幕或复杂公文等高负载任务时，无需担心移动端内存溢出（OOM）或发热降频，可一键将文本流式卸载至局域网内的 Windows 电脑端，利用桌面端满血模型高速推理后再将轻量级结构化 JSON 秒级回传手机。
+        </li>
+        <li>
+          <strong>Android 零跳转全局悬浮窗与 0ms 无障碍节点树直读：</strong>
+          重构了移动端通知转日程的交互范式。用户无需离开当前正在浏览的微信、QQ 或网页，点击贴边悬浮胶囊即可原地展开卡片；优先通过 Android <code>AccessibilityService</code> 直接遍历 UI 节点树提取文字（0 延迟、0 额外截图开销），仅在遇到纯图片海报时自动切换至静默截屏与离线 OCR，并直接调用原生 <code>CalendarContract</code> 静默入库，真正实现“零跳转”闭环。
+        </li>
+        <li>
+          <strong>全链路数据不出内网的隐私安全与多端硬件生态联动：</strong>
+          从屏幕文字采集、离线 OCR、GGUF 本地模型推理，到手机与电脑之间的日程双向去重同步（<code>/sync</code>），100% 在用户本地设备与局域网内闭环完成，杜绝任何云端隐私泄露风险；同时通过直接写入系统级原生日历数据库与标准 <code>RFC 5545 (.ics)</code> 协议，天然打通系统级灵动岛弹窗、智能手表及手环的跨设备提醒能力。
+        </li>
+      </ol>
+    </section>
+
+    <footer class="doc-footer">
+      <span>知程 (Anno2Agenda) — 端侧 AI 驱动的跨端无感通知转日程与智能提醒助手</span>
+      <span>技术栈：Flutter (Android / Windows) + llama.cpp + Qwen3.5 GGUF + Google ML Kit</span>
+    </footer>
+  </main>
+
+</body>
+</html>

@@ -86,6 +86,14 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
       _showSnack(msg);
     };
 
+    AIExtractorService.onCloudStatusChanged = (msg) {
+      if (!mounted) return;
+      _refreshLocalModelState();
+      if (msg != null && msg.isNotEmpty) {
+        _showSnack(msg);
+      }
+    };
+
     _terminalModel.addListener(_onTerminalUpdated);
 
     _initServices();
@@ -97,6 +105,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   @override
   void dispose() {
+    AIExtractorService.onCloudStatusChanged = null;
     _terminalModel.removeListener(_onTerminalUpdated);
     _terminalModel.dispose();
     _inputController.dispose();
@@ -175,7 +184,7 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
 
   Future<void> _refreshLocalModelState({bool preserveLastEngineInfo = false}) async {
     final downloaded = <String>{};
-    for (final spec in LocalModelManager.catalog) {
+    for (final spec in LocalModelManager.visibleCatalog()) {
       if (await LocalModelManager.isModelDownloaded(spec)) {
         downloaded.add(spec.id);
       }
@@ -193,6 +202,17 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     } else if (_engineMode == AIEngineMode.builtInRuleEngine) {
       ind = EngineIndicatorState.ready;
       indDetail = '纯端侧极速时空规则引擎 (0延迟就绪)';
+    } else if (AIExtractorService.isCloudEngineReadyToRoute &&
+        AIExtractorService.cloudConnectionState ==
+            CloudConnectionState.testing) {
+      ind = EngineIndicatorState.starting;
+      indDetail = '正在检测云端 API 连通性...';
+    } else if (AIExtractorService.isCloudEngineReadyToRoute &&
+        AIExtractorService.cloudConnectionState ==
+            CloudConnectionState.connected) {
+      ind = EngineIndicatorState.ready;
+      final cloudModel = AIExtractorService.getEffectiveCloudModel();
+      indDetail = '云端大模型已就绪 ($cloudModel)';
     } else if (isLoadedInRam) {
       ind = EngineIndicatorState.ready;
       final cur = LocalModelManager.currentlyLoadedModelId ??
@@ -241,6 +261,11 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
   }) {
     if (_engineMode == AIEngineMode.builtInRuleEngine) {
       _lastEngineInfo = '⚡ 内置纯端侧极速时空规则引擎 (0延迟 · 离线就绪)';
+    } else if (AIExtractorService.isCloudEngineReadyToRoute &&
+        AIExtractorService.cloudConnectionState ==
+            CloudConnectionState.connected) {
+      final cloudModel = AIExtractorService.getEffectiveCloudModel();
+      _lastEngineInfo = '☁️ 云端大模型已就绪 ($cloudModel) · 端云协同提取就绪';
     } else if (isLoadedInRam) {
       final cur = LocalModelManager.currentlyLoadedModelId ??
           _selectedModelName ??
@@ -300,11 +325,18 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     _terminalModel.start();
 
     final willUseLlm = _engineMode != AIEngineMode.builtInRuleEngine;
+    final willUseCloud =
+        willUseLlm && AIExtractorService.isCloudEngineReadyToRoute;
     final isAlreadyLoaded = await LocalModelManager.isModelLoadedInRam();
 
     setState(() {
       // 立即联动同步右上角药丸指示标与右侧状态描述
-      if (willUseLlm) {
+      if (willUseCloud) {
+        _engineIndicator = EngineIndicatorState.ready;
+        _engineIndicatorDetail =
+            '云端大模型推理中 (${AIExtractorService.getEffectiveCloudModel()})...';
+        _lastEngineInfo = '☁️ 正在调用云端大模型解析结构化日程...';
+      } else if (willUseLlm) {
         if (isAlreadyLoaded) {
           _engineIndicator = EngineIndicatorState.ready;
           _engineIndicatorDetail =
@@ -336,7 +368,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         mode: _engineMode,
         llmEndpoint: endpoint,
         llmModelName: _selectedModelName,
-        thinkMode: LocalModelManager.enableThinkMode,
         terminalModel: _terminalModel,
         onProgress: ({stepLog, token, tokenCount}) {
           if (token != null && _engineIndicator != EngineIndicatorState.ready) {
@@ -383,11 +414,18 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     _terminalModel.start();
 
     final willUseLlm = _engineMode != AIEngineMode.builtInRuleEngine;
+    final willUseCloud =
+        willUseLlm && AIExtractorService.isCloudEngineReadyToRoute;
     final isAlreadyLoaded = await LocalModelManager.isModelLoadedInRam();
 
     if (mounted) {
       setState(() {
-        if (willUseLlm) {
+        if (willUseCloud) {
+          _engineIndicator = EngineIndicatorState.ready;
+          _engineIndicatorDetail =
+              '云端大模型推理中 (${AIExtractorService.getEffectiveCloudModel()})...';
+          _lastEngineInfo = '☁️ 悬浮窗正在调用云端大模型生成日程...';
+        } else if (willUseLlm) {
           if (isAlreadyLoaded) {
             _engineIndicator = EngineIndicatorState.ready;
             _engineIndicatorDetail =
@@ -421,7 +459,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
         mode: _engineMode,
         llmEndpoint: endpoint,
         llmModelName: _selectedModelName,
-        thinkMode: LocalModelManager.enableThinkMode,
         terminalModel: _terminalModel,
         onProgress: ({stepLog, token, tokenCount}) {
           if (tokenCount != null && tokenCount % 6 == 1) {

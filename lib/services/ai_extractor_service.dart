@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import '../models/agenda_event.dart';
@@ -15,6 +16,48 @@ enum AIEngineMode {
 
   /// 强制连接本地或局域网桌面端 LLM 服务
   localLlmServer,
+}
+
+enum CloudConnectionState {
+  /// 待命中（未测试或尚未配置）
+  idle,
+
+  /// 正在检测网络与 API 连通性
+  testing,
+
+  /// 网络通畅，云端 API 已就绪
+  connected,
+
+  /// 连接失败或鉴权异常
+  error,
+}
+
+class CloudConnectionTestResult {
+  final bool success;
+  final String message;
+  final int latencyMs;
+  final String? detectedModel;
+
+  const CloudConnectionTestResult({
+    required this.success,
+    required this.message,
+    this.latencyMs = 0,
+    this.detectedModel,
+  });
+}
+
+class CloudModelListFetchResult {
+  final bool success;
+  final List<String> models;
+  final String message;
+  final int latencyMs;
+
+  const CloudModelListFetchResult({
+    required this.success,
+    required this.models,
+    required this.message,
+    this.latencyMs = 0,
+  });
 }
 
 class ExtractionResult {
@@ -47,6 +90,25 @@ class AIExtractorService {
 
   /// 是否启用 GBNF (GGML BNF) 强制语法约束（默认开启，在采样层屏蔽一切非规范 Token）
   static bool enableGbnfConstraint = true;
+
+  /// 云端大模型引擎全局配置与运行时连通状态
+  static bool enableCloudEngine = false;
+  static String cloudApiUrl = '';
+  static String cloudApiKey = '';
+  static String cloudModelName = '';
+  static bool enableCloudThinkMode = false;
+  static List<String> favoriteCloudModels = [];
+  static List<String> fetchedCloudModels = [];
+  static CloudConnectionState cloudConnectionState = CloudConnectionState.idle;
+  static String cloudStatusDetail = '引擎待命中';
+  static int? lastCloudLatencyMs;
+  static void Function(String? statusMsg)? onCloudStatusChanged;
+
+  /// 云端引擎是否已启用且具备基本配置
+  static bool get isCloudEngineReadyToRoute =>
+      enableCloudEngine &&
+      cloudApiUrl.trim().isNotEmpty &&
+      cloudApiKey.trim().isNotEmpty;
 
   /// 标准日程提取 GBNF (GGML BNF) 语法规则（约束顶层 {"events":[...]}、字段顺序、类型及 ISO-8601 时间格式）
   static const String defaultAgendaGbnfGrammar = r'''
@@ -306,6 +368,55 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
 
     var tokenCounter = 0;
 
+    // 0. 若已启用云端引擎且配置完整，优先路由至 OpenAI-Compatible 云端大模型
+    if (isCloudEngineReadyToRoute &&
+        effectiveMode != AIEngineMode.builtInRuleEngine) {
+      final effectiveCloudThink = thinkMode ?? enableCloudThinkMode;
+      final effectiveCloudModel = getEffectiveCloudModel();
+      try {
+        onProgress?.call(
+          stepLog: '[路由] 激活云端大模型引擎: $effectiveCloudModel (OpenAI-Compatible)',
+        );
+        if (effectiveCloudThink) {
+          onProgress?.call(stepLog: '[模式] 云端开启深度思考模式，正在接收推理思维链...');
+        } else {
+          onProgress?.call(stepLog: '[模式] 云端极速结构化模式 (JSON Object 约束)...');
+        }
+        final cloudResult = await _tryCallCloudOpenAiCompatible(
+          rawText: rawText,
+          systemPrompt: prompt,
+          sourceType: sourceType,
+          deviceOrigin: deviceOrigin,
+          apiUrl: cloudApiUrl,
+          apiKey: cloudApiKey,
+          modelName: effectiveCloudModel,
+          thinkMode: effectiveCloudThink,
+          onToken: (tok) {
+            tokenCounter++;
+            onProgress?.call(token: tok, tokenCount: tokenCounter);
+          },
+        );
+        if (cloudResult.events.isNotEmpty) {
+          sw.stop();
+          onProgress?.call(
+            stepLog:
+                '[完成] 云端引擎成功提取 ${cloudResult.events.length} 个日程事项 (耗时 ${sw.elapsedMilliseconds}ms)',
+          );
+          return ExtractionResult(
+            events: cloudResult.events,
+            engineUsed:
+                '云端大模型 ($effectiveCloudModel${effectiveCloudThink ? " · 深度思考" : ""})',
+            elapsedMs: sw.elapsedMilliseconds,
+            promptPreview: prompt,
+            rawResponse: cloudResult.rawResponse,
+          );
+        }
+        onProgress?.call(stepLog: '[回退] 云端大模型未返回有效日程，切换至本地引擎继续尝试');
+      } catch (err) {
+        onProgress?.call(stepLog: '[回退] 云端大模型请求失败 ($err)，无缝切入端侧引擎');
+      }
+    }
+
     if (effectiveMode == AIEngineMode.localLlmServer ||
         effectiveMode == AIEngineMode.hybridAuto) {
       try {
@@ -445,6 +556,643 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     );
   }
 
+  /// 创建云端 API 请求客户端（本地环回直连，远端遵循系统网络代理设置）
+  static HttpClient _createCloudHttpClient(
+    Uri uri, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    final client = HttpClient()..connectionTimeout = timeout;
+    if (uri.host == '127.0.0.1' ||
+        uri.host == 'localhost' ||
+        uri.host == '::1') {
+      client.findProxy = (_) => 'DIRECT';
+    }
+    return client;
+  }
+
+  /// 校验并规范化基础 URI
+  static Uri _parseAndValidateHttpUri(String rawUrl) {
+    final cleaned = rawUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (cleaned.isEmpty) {
+      throw const FormatException('API 地址不能为空');
+    }
+    final uri = Uri.tryParse(cleaned);
+    if (uri == null ||
+        !uri.hasScheme ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.isEmpty) {
+      throw const FormatException('API 地址格式无效，请以 http:// 或 https:// 开头');
+    }
+    return uri;
+  }
+
+  /// 将用户填写的 OpenAI-Compatible API 地址解析为 `/chat/completions` 完整端点
+  static Uri resolveOpenAiChatCompletionsUri(String rawUrl) {
+    final uri = _parseAndValidateHttpUri(rawUrl);
+    final path = uri.path.replaceAll(RegExp(r'/+$'), '');
+    if (path.endsWith('/chat/completions')) {
+      return uri.replace(path: path);
+    }
+    if (path.isEmpty) {
+      return uri.replace(path: '/v1/chat/completions');
+    }
+    if (path.endsWith('/models')) {
+      final base = path.substring(0, path.length - '/models'.length);
+      return uri.replace(path: '$base/chat/completions');
+    }
+    return uri.replace(path: '$path/chat/completions');
+  }
+
+  /// 将用户填写的 OpenAI-Compatible API 地址解析为 `/models` 探活端点
+  static Uri resolveOpenAiModelsUri(String rawUrl) {
+    final uri = _parseAndValidateHttpUri(rawUrl);
+    final path = uri.path.replaceAll(RegExp(r'/+$'), '');
+    if (path.endsWith('/models')) {
+      return uri.replace(path: path);
+    }
+    if (path.endsWith('/chat/completions')) {
+      final base = path.substring(0, path.length - '/chat/completions'.length);
+      return uri.replace(path: '$base/models');
+    }
+    if (path.isEmpty) {
+      return uri.replace(path: '/v1/models');
+    }
+    return uri.replace(path: '$path/models');
+  }
+
+  /// 根据已配置模型名或服务商域名推断当前生效的云端模型名称
+  static String getEffectiveCloudModel([String? apiUrl, String? modelName]) {
+    final explicit = (modelName ?? cloudModelName).trim();
+    if (explicit.isNotEmpty &&
+        (fetchedCloudModels.isEmpty || fetchedCloudModels.contains(explicit))) {
+      return explicit;
+    }
+    for (final fav in favoriteCloudModels) {
+      if (fetchedCloudModels.isEmpty || fetchedCloudModels.contains(fav)) {
+        return fav;
+      }
+    }
+    if (fetchedCloudModels.isNotEmpty) {
+      return fetchedCloudModels.first;
+    }
+    if (explicit.isNotEmpty) return explicit;
+    final url = (apiUrl ?? cloudApiUrl).toLowerCase();
+    if (url.contains('deepseek')) return 'deepseek-chat';
+    if (url.contains('dashscope')) return 'qwen-plus';
+    if (url.contains('siliconflow')) return 'Qwen/Qwen2.5-7B-Instruct';
+    if (url.contains('moonshot')) return 'moonshot-v1-8k';
+    if (url.contains('bigmodel')) return 'glm-4-flash';
+    return 'gpt-4o-mini';
+  }
+
+  /// 通过 OpenAI / DeepSeek 规范 GET /models 自动拉取服务商可用模型列表
+  static Future<CloudModelListFetchResult> fetchCloudModels({
+    String? apiUrl,
+    String? apiKey,
+  }) async {
+    final rawUrl = (apiUrl ?? cloudApiUrl).trim();
+    final rawKey = (apiKey ?? cloudApiKey).trim();
+
+    if (rawUrl.isEmpty) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '请先配置 API 地址';
+      onCloudStatusChanged?.call(null);
+      return const CloudModelListFetchResult(
+        success: false,
+        models: [],
+        message: '请先在服务管家中填写 OpenAI-Compatible API 地址',
+      );
+    }
+    if (rawKey.isEmpty) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '请先配置 API Key';
+      onCloudStatusChanged?.call(null);
+      return const CloudModelListFetchResult(
+        success: false,
+        models: [],
+        message: '请先在服务管家中填写 API Key',
+      );
+    }
+
+    late final Uri modelsUri;
+    try {
+      modelsUri = resolveOpenAiModelsUri(rawUrl);
+    } on FormatException catch (e) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = 'API 地址格式无效';
+      onCloudStatusChanged?.call(null);
+      return CloudModelListFetchResult(
+        success: false,
+        models: const [],
+        message: e.message,
+      );
+    }
+
+    cloudConnectionState = CloudConnectionState.testing;
+    cloudStatusDetail = '正在拉取模型列表...';
+    onCloudStatusChanged?.call(null);
+
+    final sw = Stopwatch()..start();
+    final client = _createCloudHttpClient(
+      modelsUri,
+      timeout: const Duration(seconds: 10),
+    );
+
+    Future<({int statusCode, String body})> requestModels(Uri targetUri) async {
+      final req = await client.getUrl(targetUri);
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $rawKey');
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final text = await resp.transform(utf8.decoder).join();
+      return (statusCode: resp.statusCode, body: text);
+    }
+
+    try {
+      var res = await requestModels(modelsUri);
+
+      // 兼容部分服务商（如 DeepSeek 根路径 /models）在 /v1/models 返回 404 时回退至 /models
+      if (res.statusCode == 404 && modelsUri.path == '/v1/models') {
+        res = await requestModels(modelsUri.replace(path: '/models'));
+      }
+
+      sw.stop();
+
+      if (res.statusCode == 401 || res.statusCode == 403) {
+        cloudConnectionState = CloudConnectionState.error;
+        cloudStatusDetail = '鉴权失败 (HTTP ${res.statusCode})';
+        onCloudStatusChanged?.call(null);
+        return CloudModelListFetchResult(
+          success: false,
+          models: const [],
+          message: 'API Key 无效或无权访问 (HTTP ${res.statusCode})',
+          latencyMs: sw.elapsedMilliseconds,
+        );
+      }
+
+      if (res.statusCode == 200) {
+        final decoded = jsonDecode(res.body);
+        final rawList = (decoded is Map && decoded['data'] is List)
+            ? decoded['data'] as List
+            : (decoded is Map && decoded['models'] is List)
+                ? decoded['models'] as List
+                : null;
+        if (rawList != null) {
+          final seen = <String>{};
+          final models = <String>[];
+          for (final item in rawList) {
+            final id = item is Map
+                ? (item['id'] ?? item['name'])?.toString().trim()
+                : item?.toString().trim();
+            if (id != null && id.isNotEmpty && seen.add(id)) {
+              models.add(id);
+            }
+          }
+          fetchedCloudModels = models;
+          lastCloudLatencyMs = sw.elapsedMilliseconds;
+          cloudConnectionState = CloudConnectionState.connected;
+          cloudStatusDetail = '引擎已就绪 (${sw.elapsedMilliseconds}ms)';
+          onCloudStatusChanged?.call(null);
+          return CloudModelListFetchResult(
+            success: true,
+            models: models,
+            message: models.isEmpty
+                ? '连接成功，但服务商未返回可用模型'
+                : '成功拉取 ${models.length} 个模型 (${sw.elapsedMilliseconds}ms)',
+            latencyMs: sw.elapsedMilliseconds,
+          );
+        }
+      }
+
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '拉取失败 (HTTP ${res.statusCode})';
+      onCloudStatusChanged?.call(null);
+      return CloudModelListFetchResult(
+        success: false,
+        models: const [],
+        message: '拉取模型列表失败 (HTTP ${res.statusCode})，请确认服务商地址支持 /models 接口',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } on TimeoutException {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '连接超时，网络不通畅';
+      onCloudStatusChanged?.call(null);
+      return CloudModelListFetchResult(
+        success: false,
+        models: const [],
+        message: '拉取模型列表超时，请检查网络连接',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } on SocketException catch (e) {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '网络不可达';
+      onCloudStatusChanged?.call(null);
+      return CloudModelListFetchResult(
+        success: false,
+        models: const [],
+        message: '网络连接失败: ${e.message}',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } catch (e) {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '拉取模型异常';
+      onCloudStatusChanged?.call(null);
+      return CloudModelListFetchResult(
+        success: false,
+        models: const [],
+        message: '拉取模型列表异常: $e',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 重置云端连接状态至待命中
+  static void resetCloudStatus() {
+    cloudConnectionState = CloudConnectionState.idle;
+    cloudStatusDetail = '引擎待命中';
+    lastCloudLatencyMs = null;
+    onCloudStatusChanged?.call(null);
+  }
+
+  /// 检测云端 OpenAI-Compatible API 提供商的网络通畅性与凭据有效性
+  static Future<CloudConnectionTestResult> testCloudConnection({
+    String? apiUrl,
+    String? apiKey,
+    String? modelName,
+  }) async {
+    final rawUrl = (apiUrl ?? cloudApiUrl).trim();
+    final rawKey = (apiKey ?? cloudApiKey).trim();
+
+    if (rawUrl.isEmpty) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '请先配置 API 地址';
+      onCloudStatusChanged?.call(null);
+      return const CloudConnectionTestResult(
+        success: false,
+        message: '请先在服务管家中填写 OpenAI-Compatible API 地址',
+      );
+    }
+    if (rawKey.isEmpty) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '请先配置 API Key';
+      onCloudStatusChanged?.call(null);
+      return const CloudConnectionTestResult(
+        success: false,
+        message: '请先在服务管家中填写 API Key',
+      );
+    }
+
+    late final Uri modelsUri;
+    late final Uri chatUri;
+    try {
+      modelsUri = resolveOpenAiModelsUri(rawUrl);
+      chatUri = resolveOpenAiChatCompletionsUri(rawUrl);
+    } on FormatException catch (e) {
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = 'API 地址格式无效';
+      onCloudStatusChanged?.call(null);
+      return CloudConnectionTestResult(
+        success: false,
+        message: e.message,
+      );
+    }
+
+    cloudConnectionState = CloudConnectionState.testing;
+    cloudStatusDetail = '正在检测连接中...';
+    onCloudStatusChanged?.call('⏳ 正在检测云端 API 网络连通性...');
+
+    final sw = Stopwatch()..start();
+    final client = _createCloudHttpClient(
+      modelsUri,
+      timeout: const Duration(seconds: 8),
+    );
+    try {
+      // 1. 优先通过零 Token 开销的 GET /models 探测网络与 Key 有效性
+      final req = await client.getUrl(modelsUri);
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $rawKey');
+      req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final resp = await req.close().timeout(const Duration(seconds: 8));
+      final body = await resp.transform(utf8.decoder).join();
+
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        sw.stop();
+        cloudConnectionState = CloudConnectionState.error;
+        cloudStatusDetail = '鉴权失败 (HTTP ${resp.statusCode})';
+        onCloudStatusChanged?.call(null);
+        return CloudConnectionTestResult(
+          success: false,
+          message: 'API Key 无效或无权访问 (HTTP ${resp.statusCode})',
+          latencyMs: sw.elapsedMilliseconds,
+        );
+      }
+
+      if (resp.statusCode == 200) {
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is Map && decoded['data'] is List) {
+            final dataList = decoded['data'] as List;
+            String? detected;
+            if (dataList.isNotEmpty && dataList.first is Map) {
+              detected = (dataList.first as Map)['id']?.toString();
+            }
+            sw.stop();
+            lastCloudLatencyMs = sw.elapsedMilliseconds;
+            cloudConnectionState = CloudConnectionState.connected;
+            cloudStatusDetail = '引擎已就绪 (${sw.elapsedMilliseconds}ms)';
+            onCloudStatusChanged?.call(null);
+            return CloudConnectionTestResult(
+              success: true,
+              message: '连接成功 · 网络通畅 (${sw.elapsedMilliseconds}ms)',
+              latencyMs: sw.elapsedMilliseconds,
+              detectedModel: detected,
+            );
+          }
+        } catch (_) {
+          // 某些网关可能对 /models 返回非标准 JSON，继续尝试 chat/completions 探活
+        }
+      }
+
+      // 2. 若服务商不支持 /models（如 404/405/501）或返回非标准体，发起极轻量对话探活
+      final effectiveModel = getEffectiveCloudModel(rawUrl, modelName);
+      final chatReq = await client.postUrl(chatUri);
+      chatReq.headers.contentType =
+          ContentType('application', 'json', charset: 'utf-8');
+      chatReq.headers.set(HttpHeaders.authorizationHeader, 'Bearer $rawKey');
+      chatReq.add(utf8.encode(jsonEncode({
+        'model': effectiveModel,
+        'messages': const [
+          {'role': 'user', 'content': 'ping'},
+        ],
+        'max_tokens': 1,
+        'stream': false,
+      })));
+      final chatResp = await chatReq.close().timeout(const Duration(seconds: 12));
+      final chatBody = await chatResp.transform(utf8.decoder).join();
+      sw.stop();
+
+      if (chatResp.statusCode == 401 || chatResp.statusCode == 403) {
+        cloudConnectionState = CloudConnectionState.error;
+        cloudStatusDetail = '鉴权失败 (HTTP ${chatResp.statusCode})';
+        onCloudStatusChanged?.call(null);
+        return CloudConnectionTestResult(
+          success: false,
+          message: 'API Key 无效或无权访问 (HTTP ${chatResp.statusCode})',
+          latencyMs: sw.elapsedMilliseconds,
+        );
+      }
+
+      if (chatResp.statusCode == 200) {
+        try {
+          final decoded = jsonDecode(chatBody);
+          if (decoded is Map &&
+              (decoded['choices'] is List || decoded.containsKey('id'))) {
+            lastCloudLatencyMs = sw.elapsedMilliseconds;
+            cloudConnectionState = CloudConnectionState.connected;
+            cloudStatusDetail = '引擎已就绪 (${sw.elapsedMilliseconds}ms)';
+            onCloudStatusChanged?.call(null);
+            return CloudConnectionTestResult(
+              success: true,
+              message: '连接成功 · 网络通畅 (${sw.elapsedMilliseconds}ms)',
+              latencyMs: sw.elapsedMilliseconds,
+              detectedModel: decoded['model']?.toString() ?? effectiveModel,
+            );
+          }
+        } catch (_) {}
+      }
+
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '连接异常 (HTTP ${chatResp.statusCode})';
+      onCloudStatusChanged?.call(null);
+      return CloudConnectionTestResult(
+        success: false,
+        message: '接口响应异常 (HTTP ${chatResp.statusCode})，请核对 API 地址与模型名',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } on TimeoutException {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '连接超时，网络不通畅';
+      onCloudStatusChanged?.call(null);
+      return CloudConnectionTestResult(
+        success: false,
+        message: '连接超时，无法访问云端服务提供商',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } on SocketException catch (e) {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '网络不可达';
+      onCloudStatusChanged?.call(null);
+      return CloudConnectionTestResult(
+        success: false,
+        message: '网络连接失败: ${e.message}',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } catch (e) {
+      sw.stop();
+      cloudConnectionState = CloudConnectionState.error;
+      cloudStatusDetail = '连接异常';
+      onCloudStatusChanged?.call(null);
+      return CloudConnectionTestResult(
+        success: false,
+        message: '连接测试异常: $e',
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 调用 OpenAI-Compatible `/chat/completions` 接口并返回原始文本内容
+  static Future<String> _requestCloudOpenAiRaw({
+    required String apiUrl,
+    required String apiKey,
+    required String modelName,
+    required String systemPrompt,
+    required String userPrompt,
+    required bool thinkMode,
+    void Function(String token)? onToken,
+  }) async {
+    final uri = resolveOpenAiChatCompletionsUri(apiUrl);
+    final client = _createCloudHttpClient(
+      uri,
+      timeout: const Duration(seconds: 15),
+    );
+    final streamMode = onToken != null;
+
+    Future<HttpClientResponse> sendRequest({bool includeJsonFormat = true}) async {
+      final req = await client.postUrl(uri);
+      req.headers.contentType =
+          ContentType('application', 'json', charset: 'utf-8');
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${apiKey.trim()}');
+      final body = <String, dynamic>{
+        'model': modelName,
+        'messages': [
+          {'role': 'system', 'content': systemPrompt},
+          {'role': 'user', 'content': userPrompt},
+        ],
+        'stream': streamMode,
+        'temperature': LocalModelManager.temperature,
+        'top_p': LocalModelManager.topP,
+        if (!thinkMode && includeJsonFormat)
+          'response_format': {'type': 'json_object'},
+      };
+      req.add(utf8.encode(jsonEncode(body)));
+      return req.close().timeout(Duration(seconds: thinkMode ? 90 : 45));
+    }
+
+    try {
+      var resp = await sendRequest(includeJsonFormat: true);
+      if (resp.statusCode == 400 && !thinkMode) {
+        await resp.drain();
+        resp = await sendRequest(includeJsonFormat: false);
+      }
+
+      if (resp.statusCode != 200) {
+        final errBody = await resp.transform(utf8.decoder).join();
+        cloudConnectionState = CloudConnectionState.error;
+        cloudStatusDetail = '请求异常 (HTTP ${resp.statusCode})';
+        onCloudStatusChanged?.call(null);
+        throw Exception('HTTP ${resp.statusCode}: $errBody');
+      }
+
+      final sw = Stopwatch()..start();
+      if (streamMode) {
+        final contentBuffer = StringBuffer();
+        final thinkingBuffer = StringBuffer();
+        bool inThinkTag = false;
+        final rawBodyBuffer = StringBuffer();
+
+        await for (final line in resp
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())) {
+          final trimmed = line.trim();
+          if (trimmed.isEmpty) continue;
+          rawBodyBuffer.writeln(trimmed);
+          if (!trimmed.startsWith('data:')) continue;
+
+          final payload = trimmed.substring(5).trim();
+          if (payload == '[DONE]') break;
+
+          try {
+            final parsed = jsonDecode(payload);
+            if (parsed is Map && parsed['choices'] is List) {
+              final choices = parsed['choices'] as List;
+              if (choices.isEmpty || choices.first is! Map) continue;
+              final firstChoice = choices.first as Map;
+              final delta = firstChoice['delta'];
+              if (delta is Map) {
+                final reasoningTok = delta['reasoning_content']?.toString() ??
+                    delta['reasoning']?.toString() ??
+                    '';
+                if (reasoningTok.isNotEmpty) {
+                  if (!inThinkTag) {
+                    inThinkTag = true;
+                  }
+                  thinkingBuffer.write(reasoningTok);
+                  onToken(reasoningTok);
+                }
+                final contentTok = delta['content']?.toString() ?? '';
+                if (contentTok.isNotEmpty) {
+                  if (inThinkTag) {
+                    inThinkTag = false;
+                  }
+                  contentBuffer.write(contentTok);
+                  onToken(contentTok);
+                }
+              } else if (firstChoice['message'] is Map) {
+                final msgContent =
+                    (firstChoice['message'] as Map)['content']?.toString() ?? '';
+                if (msgContent.isNotEmpty) {
+                  contentBuffer.write(msgContent);
+                  onToken(msgContent);
+                }
+              }
+            }
+          } catch (_) {}
+        }
+
+        // 兼容部分未按 SSE 返回而直接返回整段 JSON 的网关
+        if (contentBuffer.isEmpty && rawBodyBuffer.isNotEmpty) {
+          try {
+            final decoded = jsonDecode(rawBodyBuffer.toString());
+            if (decoded is Map && decoded['choices'] is List) {
+              final choices = decoded['choices'] as List;
+              if (choices.isNotEmpty && choices.first is Map) {
+                final msg = (choices.first as Map)['message'];
+                if (msg is Map && msg['content'] != null) {
+                  final text = msg['content'].toString();
+                  contentBuffer.write(text);
+                  onToken(text);
+                }
+              }
+            }
+          } catch (_) {}
+        }
+
+        sw.stop();
+        cloudConnectionState = CloudConnectionState.connected;
+        cloudStatusDetail = '引擎已就绪';
+        onCloudStatusChanged?.call(null);
+        return contentBuffer.toString().trim();
+      } else {
+        final respText = await resp.transform(utf8.decoder).join();
+        final decoded = jsonDecode(respText);
+        if (decoded is Map && decoded['choices'] is List) {
+          final choices = decoded['choices'] as List;
+          if (choices.isNotEmpty && choices.first is Map) {
+            final msg = (choices.first as Map)['message'];
+            if (msg is Map) {
+              final content = msg['content']?.toString() ?? '';
+              cloudConnectionState = CloudConnectionState.connected;
+              cloudStatusDetail = '引擎已就绪';
+              onCloudStatusChanged?.call(null);
+              return content.trim();
+            }
+          }
+        }
+        return respText.trim();
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 调用 OpenAI-Compatible 云端大模型提取结构化日程
+  static Future<({List<AgendaEvent> events, String rawResponse})>
+      _tryCallCloudOpenAiCompatible({
+    required String rawText,
+    required String systemPrompt,
+    required String sourceType,
+    required String deviceOrigin,
+    required String apiUrl,
+    required String apiKey,
+    required String modelName,
+    required bool thinkMode,
+    void Function(String token)? onToken,
+  }) async {
+    final rawResponse = await _requestCloudOpenAiRaw(
+      apiUrl: apiUrl,
+      apiKey: apiKey,
+      modelName: modelName,
+      systemPrompt: systemPrompt,
+      userPrompt: rawText,
+      thinkMode: thinkMode,
+      onToken: onToken,
+    );
+    final events = _parseEventsFromRawJsonString(
+      rawJson: rawResponse,
+      rawText: rawText,
+      sourceType: sourceType,
+      deviceOrigin: deviceOrigin,
+    );
+    return (events: events, rawResponse: rawResponse);
+  }
+
   /// 构建带 GBNF 语法规则与 JSON Schema 结构化约束的推理请求载荷
   static Map<String, dynamic> _buildLlmRequestBody({
     required String modelName,
@@ -507,6 +1255,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
           sourceType: sourceType,
           deviceOrigin: deviceOrigin,
           modelName: modelName,
+          thinkMode: thinkMode,
           useGbnf: useGbnf,
           onToken: onToken,
         );
@@ -551,6 +1300,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
             sourceType: sourceType,
             deviceOrigin: deviceOrigin,
             modelName: modelName,
+            thinkMode: thinkMode,
             useGbnf: useGbnf,
             onToken: onToken,
           );
@@ -696,14 +1446,44 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     required String systemPrompt,
     required String userPrompt,
     required bool useGbnf,
+    String? modelName,
+    bool thinkMode = false,
     void Function(String token)? onToken,
     void Function(String log)? onLog,
   }) async {
-    final fullPrompt = '<|im_start|>system\n'
-        '$systemPrompt<|im_end|>\n'
-        '<|im_start|>user\n'
-        '$userPrompt<|im_end|>\n'
-        '<|im_start|>assistant\n';
+    final isSpark = (modelName ?? '').toLowerCase().contains('spark');
+    final String fullPrompt;
+    final List<String> stopTokens;
+
+    if (isSpark) {
+      // 讯飞星火 Spark-X2.5 专用 Prompt 对话模板与停止词
+      // Jinja 格式: <｜start of sentence｜><|System|>\n...<｜end of sentence｜><｜start of sentence｜><|User|>\n...<｜end of sentence｜><｜start of sentence｜><|Bot|>\n
+      // 如果 thinkMode 为 false，通过注入 </think>\n 即刻 bypass 思考链，实现毫秒级直接输出 JSON
+      final thinkPrefix = thinkMode ? '<think>\n' : '</think>\n';
+      fullPrompt = '<｜start of sentence｜><|System|>\n'
+          '$systemPrompt<｜end of sentence｜>'
+          '<｜start of sentence｜><|User|>\n'
+          '$userPrompt<｜end of sentence｜>'
+          '<｜start of sentence｜><|Bot|>\n'
+          '$thinkPrefix';
+      stopTokens = [
+        '<｜end of sentence｜>',
+        '<|endoftext|>',
+        '<|User|>',
+        '<|Bot|>',
+      ];
+    } else {
+      // 默认 Qwen ChatML 模板
+      fullPrompt = '<|im_start|>system\n'
+          '$systemPrompt<|im_end|>\n'
+          '<|im_start|>user\n'
+          '$userPrompt<|im_end|>\n'
+          '<|im_start|>assistant\n';
+      stopTokens = [
+        '<|im_end|>',
+        '<|endoftext|>',
+      ];
+    }
 
     Future<HttpClientResponse> doSend({bool includeConstraint = true}) async {
       final req = await client.postUrl(uri);
@@ -713,14 +1493,15 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
         'prompt': fullPrompt,
         'stream': onToken != null,
         'temperature': 0.1,
-        'n_predict': 1024,
+        'n_predict': thinkMode ? 2048 : 1024,
+        'stop': stopTokens,
       };
       if (useGbnf && includeConstraint) {
         // llama-server 优先使用 json_schema（由底层 llama.cpp C++ 原生编译为 GBNF 采样器，杜绝语法解析错误）
         body['json_schema'] = agendaJsonSchema;
       }
       req.add(utf8.encode(jsonEncode(body)));
-      return req.close().timeout(const Duration(seconds: 50));
+      return req.close().timeout(Duration(seconds: thinkMode ? 70 : 50));
     }
 
     var resp = await doSend(includeConstraint: true);
@@ -781,6 +1562,7 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     required String deviceOrigin,
     required String modelName,
     required bool useGbnf,
+    bool thinkMode = false,
     void Function(String token)? onToken,
   }) async {
     final raw = await _requestLlamaServerCompletion(
@@ -789,6 +1571,8 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
       systemPrompt: systemPrompt,
       userPrompt: rawText,
       useGbnf: useGbnf,
+      modelName: modelName,
+      thinkMode: thinkMode,
       onToken: onToken,
     );
     if (raw == null || raw.isEmpty) return [];
@@ -889,7 +1673,19 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     required String sourceType,
     required String deviceOrigin,
   }) {
-    final trimmed = rawJson.trim();
+    var trimmed = rawJson
+        .replaceAll('<｜end of sentence｜>', '')
+        .replaceAll('<｜start of sentence｜>', '')
+        .replaceAll('<|Bot|>', '')
+        .replaceAll('<|User|>', '')
+        .replaceAll('<|System|>', '')
+        .replaceAll('<|im_end|>', '')
+        .replaceAll('<|endoftext|>', '')
+        .trim();
+    final thinkEnd = trimmed.indexOf('</think>');
+    if (thinkEnd != -1) {
+      trimmed = trimmed.substring(thinkEnd + '</think>'.length).trim();
+    }
     if (trimmed.isEmpty) return [];
 
     dynamic parsedJson;
@@ -1016,7 +1812,15 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     String sourceType = 'test',
     String deviceOrigin = 'local',
   }) {
-    var trimmed = rawJson.trim();
+    var trimmed = rawJson
+        .replaceAll('<｜end of sentence｜>', '')
+        .replaceAll('<｜start of sentence｜>', '')
+        .replaceAll('<|Bot|>', '')
+        .replaceAll('<|User|>', '')
+        .replaceAll('<|System|>', '')
+        .replaceAll('<|im_end|>', '')
+        .replaceAll('<|endoftext|>', '')
+        .trim();
     if (trimmed.isEmpty) {
       return (events: <AgendaEvent>[], parseError: '大模型返回内容为空');
     }
@@ -1173,6 +1977,59 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
     }
 
     var tokenCounter = 0;
+
+    if (isCloudEngineReadyToRoute) {
+      final effectiveCloudModel = getEffectiveCloudModel();
+      onProgress?.call(
+        stepLog: '[路由] 激活云端大模型调试: $effectiveCloudModel (OpenAI-Compatible)',
+      );
+      try {
+        final cloudRaw = await _requestCloudOpenAiRaw(
+          apiUrl: cloudApiUrl,
+          apiKey: cloudApiKey,
+          modelName: effectiveCloudModel,
+          systemPrompt: prompt,
+          userPrompt: userPrompt,
+          thinkMode: thinkMode,
+          onToken: (tok) {
+            tokenCounter++;
+            onProgress?.call(token: tok, tokenCount: tokenCounter);
+          },
+        );
+        sw.stop();
+        final diag = parseAndDiagnoseJson(
+          rawJson: cloudRaw,
+          rawText: userPrompt,
+          sourceType: 'prompt_test',
+          deviceOrigin: deviceOrigin,
+        );
+        onProgress?.call(
+          stepLog:
+              '[完成] 云端推理结束 (${sw.elapsedMilliseconds}ms)，提取到 ${diag.events.length} 个日程事项',
+        );
+        return ExtractionResult(
+          events: diag.events,
+          engineUsed:
+              '云端大模型 ($effectiveCloudModel${thinkMode ? " · 深度思考" : ""})',
+          elapsedMs: sw.elapsedMilliseconds,
+          promptPreview: prompt,
+          rawResponse: cloudRaw,
+          jsonParseError: diag.parseError,
+        );
+      } catch (e) {
+        sw.stop();
+        onProgress?.call(stepLog: '[错误] 云端推理调试失败: $e');
+        return ExtractionResult(
+          events: [],
+          engineUsed: '云端调试失败',
+          elapsedMs: sw.elapsedMilliseconds,
+          promptPreview: prompt,
+          rawResponse: '',
+          jsonParseError: '云端推理异常: $e',
+        );
+      }
+    }
+
     String targetModel = modelName ?? '';
     if (targetModel.isEmpty) {
       final activeModels =
@@ -1248,6 +2105,8 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
             systemPrompt: prompt,
             userPrompt: userPrompt,
             useGbnf: effectiveGbnf,
+            modelName: targetModel,
+            thinkMode: thinkMode,
             onToken: (tok) {
               tokenCounter++;
               onProgress?.call(token: tok, tokenCount: tokenCounter);
@@ -1312,6 +2171,8 @@ ws ::= | " " | "\n"{1,2} [ \t]{0,16}
             systemPrompt: prompt,
             userPrompt: userPrompt,
             useGbnf: effectiveGbnf,
+            modelName: targetModel,
+            thinkMode: thinkMode,
             onToken: (tok) {
               tokenCounter++;
               onProgress?.call(token: tok, tokenCount: tokenCounter);

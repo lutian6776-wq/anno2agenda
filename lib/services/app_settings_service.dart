@@ -35,6 +35,16 @@ class AppSettingsService {
   double _topP = 0.90;
   double _repeatPenalty = 1.10;
 
+  // 云端大模型引擎配置项
+  bool _enableCloudEngine = false;
+  bool _cloudRiskAccepted = false;
+  String _cloudApiUrl = '';
+  String _cloudApiKey = '';
+  String _cloudModelName = '';
+  bool _enableCloudThinkMode = false;
+  List<String> _favoriteCloudModels = [];
+  List<String> _fetchedCloudModels = [];
+
   // Getters
   AIEngineMode get engineMode => _engineMode;
   int get idleUnloadMinutes => _idleUnloadMinutes;
@@ -50,6 +60,23 @@ class AppSettingsService {
   double get temperature => _temperature;
   double get topP => _topP;
   double get repeatPenalty => _repeatPenalty;
+  bool get enableCloudEngine => _enableCloudEngine;
+  bool get cloudRiskAccepted => _cloudRiskAccepted;
+  String get cloudApiUrl => _cloudApiUrl;
+  String get cloudApiKey => _cloudApiKey;
+  String get cloudModelName => _cloudModelName;
+  bool get enableCloudThinkMode => _enableCloudThinkMode;
+  List<String> get favoriteCloudModels =>
+      List.unmodifiable(_favoriteCloudModels);
+  List<String> get fetchedCloudModels => List.unmodifiable(_fetchedCloudModels);
+  bool get isCloudConfigured =>
+      _cloudApiUrl.trim().isNotEmpty && _cloudApiKey.trim().isNotEmpty;
+
+  /// 判断收藏模型在最新拉取的模型列表中是否仍然可用（若尚未拉取列表则默认视为可用）
+  bool isFavoriteCloudModelAvailable(String modelId) {
+    if (_fetchedCloudModels.isEmpty) return true;
+    return _fetchedCloudModels.contains(modelId);
+  }
 
   // --- 边界常量定义 ---
   static const int minContextSize = 512;
@@ -92,9 +119,35 @@ class AppSettingsService {
     return _settingsFile!;
   }
 
+  void _resetToDefaults() {
+    _engineMode = AIEngineMode.hybridAuto;
+    _idleUnloadMinutes = 5;
+    _enableThinkMode = false;
+    _autoPreloadOnOverlayExpand = true;
+    _enableGbnfConstraint = true;
+    _preferredModel = null;
+    _llmEndpoint = 'http://127.0.0.1:11434/api/generate';
+    _peerIp = '';
+    _syncDeleteFromSystemCalendar = true;
+    _contextSize = defaultContextSize;
+    _maxThinkingTokens = defaultThinkingTokens;
+    _temperature = defaultTemperature;
+    _topP = defaultTopP;
+    _repeatPenalty = defaultRepeatPenalty;
+    _enableCloudEngine = false;
+    _cloudRiskAccepted = false;
+    _cloudApiUrl = '';
+    _cloudApiKey = '';
+    _cloudModelName = '';
+    _enableCloudThinkMode = false;
+    _favoriteCloudModels = [];
+    _fetchedCloudModels = [];
+  }
+
   /// 初始化并从本地加载所有已保存的设置
   Future<void> init([String? storageDir]) async {
     try {
+      _resetToDefaults();
       final file = await _resolveSettingsFile(storageDir);
       if (await file.exists()) {
         final text = await file.readAsString();
@@ -167,6 +220,41 @@ class AppSettingsService {
                       .clamp(minRepeatPenalty, maxRepeatPenalty) ??
                   defaultRepeatPenalty;
             }
+            if (decoded.containsKey('enableCloudEngine')) {
+              _enableCloudEngine =
+                  decoded['enableCloudEngine'] as bool? ?? false;
+            }
+            if (decoded.containsKey('cloudRiskAccepted')) {
+              _cloudRiskAccepted =
+                  decoded['cloudRiskAccepted'] as bool? ?? false;
+            }
+            if (decoded.containsKey('cloudApiUrl')) {
+              _cloudApiUrl = decoded['cloudApiUrl']?.toString() ?? '';
+            }
+            if (decoded.containsKey('cloudApiKey')) {
+              _cloudApiKey = decoded['cloudApiKey']?.toString() ?? '';
+            }
+            if (decoded.containsKey('cloudModelName')) {
+              _cloudModelName = decoded['cloudModelName']?.toString() ?? '';
+            }
+            if (decoded.containsKey('enableCloudThinkMode')) {
+              _enableCloudThinkMode =
+                  decoded['enableCloudThinkMode'] as bool? ?? false;
+            }
+            if (decoded['favoriteCloudModels'] is List) {
+              _favoriteCloudModels = (decoded['favoriteCloudModels'] as List)
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toSet()
+                  .toList();
+            }
+            if (decoded['fetchedCloudModels'] is List) {
+              _fetchedCloudModels = (decoded['fetchedCloudModels'] as List)
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toSet()
+                  .toList();
+            }
           }
         }
       }
@@ -183,6 +271,13 @@ class AppSettingsService {
     AIExtractorService.currentPreferredModel = _preferredModel;
     AIExtractorService.currentLlmEndpoint = _llmEndpoint;
     AIExtractorService.enableGbnfConstraint = _enableGbnfConstraint;
+    AIExtractorService.enableCloudEngine = _enableCloudEngine;
+    AIExtractorService.cloudApiUrl = _cloudApiUrl;
+    AIExtractorService.cloudApiKey = _cloudApiKey;
+    AIExtractorService.cloudModelName = _cloudModelName;
+    AIExtractorService.enableCloudThinkMode = _enableCloudThinkMode;
+    AIExtractorService.favoriteCloudModels = List.from(_favoriteCloudModels);
+    AIExtractorService.fetchedCloudModels = List.from(_fetchedCloudModels);
 
     LocalModelManager.idleUnloadMinutes = _idleUnloadMinutes;
     LocalModelManager.enableThinkMode = _enableThinkMode;
@@ -196,6 +291,8 @@ class AppSettingsService {
 
   /// 异步持久化配置到 JSON 文件
   Future<void> save() async {
+    _syncToServices();
+    if (skipPersistForTest) return;
     try {
       final file = await _resolveSettingsFile();
       final data = {
@@ -213,9 +310,16 @@ class AppSettingsService {
         'temperature': _temperature,
         'topP': _topP,
         'repeatPenalty': _repeatPenalty,
+        'enableCloudEngine': _enableCloudEngine,
+        'cloudRiskAccepted': _cloudRiskAccepted,
+        'cloudApiUrl': _cloudApiUrl,
+        'cloudApiKey': _cloudApiKey,
+        'cloudModelName': _cloudModelName,
+        'enableCloudThinkMode': _enableCloudThinkMode,
+        'favoriteCloudModels': _favoriteCloudModels,
+        'fetchedCloudModels': _fetchedCloudModels,
       };
       await file.writeAsString(const JsonEncoder.withIndent('  ').convert(data));
-      _syncToServices();
     } catch (e) {
       debugPrint('[AppSettingsService] 保存配置异常: $e');
     }
@@ -313,5 +417,133 @@ class AppSettingsService {
     _repeatPenalty = defaultRepeatPenalty;
     _syncToServices();
     await save();
+  }
+
+  // --- 云端引擎状态更新与持久化方法 ---
+
+  Future<void> setEnableCloudEngine(bool val) async {
+    _enableCloudEngine = val;
+    AIExtractorService.enableCloudEngine = val;
+    await save();
+  }
+
+  Future<void> setCloudRiskAccepted(bool val) async {
+    _cloudRiskAccepted = val;
+    await save();
+  }
+
+  Future<void> setCloudApiUrl(String url) async {
+    _cloudApiUrl = url.trim();
+    AIExtractorService.cloudApiUrl = _cloudApiUrl;
+    AIExtractorService.resetCloudStatus();
+    await save();
+  }
+
+  Future<void> setCloudApiKey(String key) async {
+    _cloudApiKey = key.trim();
+    AIExtractorService.cloudApiKey = _cloudApiKey;
+    AIExtractorService.resetCloudStatus();
+    await save();
+  }
+
+  Future<void> setCloudModelName(String model) async {
+    _cloudModelName = model.trim();
+    AIExtractorService.cloudModelName = _cloudModelName;
+    await save();
+  }
+
+  Future<void> setCloudServiceConfig({
+    required String apiUrl,
+    required String apiKey,
+    String? modelName,
+  }) async {
+    _cloudApiUrl = apiUrl.trim();
+    _cloudApiKey = apiKey.trim();
+    if (modelName != null) {
+      _cloudModelName = modelName.trim();
+    }
+    AIExtractorService.cloudApiUrl = _cloudApiUrl;
+    AIExtractorService.cloudApiKey = _cloudApiKey;
+    AIExtractorService.cloudModelName = _cloudModelName;
+    AIExtractorService.resetCloudStatus();
+    await save();
+  }
+
+  Future<void> setEnableCloudThinkMode(bool val) async {
+    _enableCloudThinkMode = val;
+    AIExtractorService.enableCloudThinkMode = val;
+    await save();
+  }
+
+  Future<void> setFavoriteCloudModels(List<String> models) async {
+    final seen = <String>{};
+    final deduped = <String>[];
+    for (final m in models) {
+      final trimmed = m.trim();
+      if (trimmed.isNotEmpty && seen.add(trimmed)) {
+        deduped.add(trimmed);
+      }
+    }
+    _favoriteCloudModels = deduped;
+    await save();
+  }
+
+  Future<void> addFavoriteCloudModel(String modelId) async {
+    final trimmed = modelId.trim();
+    if (trimmed.isEmpty || _favoriteCloudModels.contains(trimmed)) return;
+    _favoriteCloudModels = [..._favoriteCloudModels, trimmed];
+    await save();
+  }
+
+  Future<void> removeFavoriteCloudModel(String modelId) async {
+    final trimmed = modelId.trim();
+    if (!_favoriteCloudModels.contains(trimmed)) return;
+    _favoriteCloudModels =
+        _favoriteCloudModels.where((m) => m != trimmed).toList();
+    await save();
+  }
+
+  Future<void> toggleFavoriteCloudModel(String modelId) async {
+    final trimmed = modelId.trim();
+    if (trimmed.isEmpty) return;
+    if (_favoriteCloudModels.contains(trimmed)) {
+      await removeFavoriteCloudModel(trimmed);
+    } else {
+      await addFavoriteCloudModel(trimmed);
+    }
+  }
+
+  Future<void> setFetchedCloudModels(List<String> models) async {
+    final seen = <String>{};
+    final deduped = <String>[];
+    for (final m in models) {
+      final trimmed = m.trim();
+      if (trimmed.isNotEmpty && seen.add(trimmed)) {
+        deduped.add(trimmed);
+      }
+    }
+    _fetchedCloudModels = deduped;
+    if (deduped.isNotEmpty && _cloudModelName.trim().isEmpty) {
+      final availableFav = _favoriteCloudModels.firstWhere(
+        (f) => deduped.contains(f),
+        orElse: () => '',
+      );
+      _cloudModelName =
+          availableFav.isNotEmpty ? availableFav : deduped.first;
+    }
+    await save();
+  }
+
+  @visibleForTesting
+  bool skipPersistForTest = false;
+
+  @visibleForTesting
+  void resetForTest() {
+    _resetToDefaults();
+    _settingsFile = null;
+    _isInitialized = false;
+    skipPersistForTest = false;
+    _syncToServices();
+    AIExtractorService.resetCloudStatus();
   }
 }

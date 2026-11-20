@@ -76,4 +76,20 @@ void main() {
     expect(LocalModelManager.normalizeModelId(fullPathCatalog), 'spark-x2.5-1.7b');
     expect(LocalModelManager.getModelDisplayName(fullPathCatalog), '讯飞星火 Spark-X2.5-1.7B');
   });
+
+  test('LocalModelManager visibleCatalog hides desktop-only Spark models on mobile', () {
+    final mobileIds = LocalModelManager.visibleCatalog(isMobile: true)
+        .map((s) => s.id)
+        .toSet();
+    expect(mobileIds.contains('qwen3.5-0.8b'), isTrue);
+    expect(mobileIds.contains('qwen3.5-2b'), isTrue);
+    expect(mobileIds.contains('spark-x2.5-1.7b'), isFalse);
+    expect(mobileIds.contains('spark-x2.5-4b'), isFalse);
+
+    final desktopIds = LocalModelManager.visibleCatalog(isMobile: false)
+        .map((s) => s.id)
+        .toSet();
+    expect(desktopIds.contains('spark-x2.5-1.7b'), isTrue);
+    expect(desktopIds.contains('spark-x2.5-4b'), isTrue);
+  });
 }

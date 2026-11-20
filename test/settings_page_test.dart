@@ -1,12 +1,25 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anno2agenda/models/agenda_event.dart';
 import 'package:anno2agenda/repositories/agenda_repository.dart';
 import 'package:anno2agenda/pages/settings_page.dart';
 import 'package:anno2agenda/services/ai_extractor_service.dart';
+import 'package:anno2agenda/services/app_settings_service.dart';
 import 'package:anno2agenda/services/local_model_manager.dart';
 
 void main() {
+  setUp(() {
+    AppSettingsService.instance.resetForTest();
+    AppSettingsService.instance.skipPersistForTest = true;
+  });
+
+  tearDown(() {
+    AppSettingsService.instance.resetForTest();
+    AIExtractorService.resetCloudStatus();
+  });
+
   testWidgets('SettingsPage renders compact grouped list layout correctly with model manager and unified drawers',
       (WidgetTester tester) async {
     final peerIpController = TextEditingController();
@@ -42,11 +55,13 @@ void main() {
     expect(find.text('深色'), findsOneWidget);
     expect(find.text('跟随系统'), findsOneWidget);
 
-    // 2. Module 2: Engine settings (Group Header "端侧引擎", Model Center as first row)
+    // 2. Module 2: Engine settings (Cloud Engine above On-Device Engine)
+    expect(find.text('云端引擎'), findsWidgets);
     expect(find.text('端侧引擎'), findsWidgets);
     expect(find.text('模型管家'), findsOneWidget);
 
     // Test clicking "模型管家" row calls onOpenModelCenter and opens bottom sheet
+    await tester.ensureVisible(find.text('模型管家'));
     await tester.tap(find.text('模型管家'));
     await tester.pumpAndSettle();
     expect(modelCenterOpened, isTrue);
@@ -58,12 +73,18 @@ void main() {
     expect(find.text('端侧模型管家'), findsNothing);
 
     expect(find.text('释放内存'), findsOneWidget); // Because engineIndicatorDetail contains "已载入"
-    expect(find.text('深度思考模式'), findsOneWidget);
+    expect(find.text('深度思考模式'), findsNWidgets(2));
     expect(find.text('开启 Thinking 增强，提升复杂日程解析精准度'), findsOneWidget);
     expect(find.text('空闲内存回收'), findsOneWidget);
     expect(find.text('推理路线与兜底策略'), findsOneWidget);
 
     // 3. Module 3: Advanced settings & Parameters in continuous surface
+    final resetBtnCheckFinder = find.text('恢复参数默认值');
+    await tester.scrollUntilVisible(
+      resetBtnCheckFinder,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('高级设置'), findsWidgets);
     expect(find.text('系统提示词模板'), findsOneWidget);
     expect(find.text('上下文窗口 (Context Size)'), findsOneWidget);
@@ -71,10 +92,16 @@ void main() {
     expect(find.text('采样温度 (Temperature)'), findsOneWidget);
     expect(find.text('核采样阈值 (Top-P)'), findsOneWidget);
     expect(find.text('重复词惩罚 (Repeat Penalty)'), findsOneWidget);
-    expect(find.text('恢复参数默认值'), findsOneWidget);
+    expect(resetBtnCheckFinder, findsOneWidget);
 
     // 4. Test clicking "空闲内存回收" to invoke drawer/bottom sheet
-    await tester.tap(find.text('空闲内存回收'));
+    final idleUnloadFinder = find.text('空闲内存回收');
+    await tester.scrollUntilVisible(
+      idleUnloadFinder,
+      -200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(idleUnloadFinder);
     await tester.pumpAndSettle();
 
     expect(find.text('空闲内存回收策略'), findsOneWidget);
@@ -92,7 +119,13 @@ void main() {
     expect(find.text('3 分钟'), findsOneWidget);
 
     // 5. Test clicking "推理路线与兜底策略" to invoke drawer/bottom sheet
-    await tester.tap(find.text('推理路线与兜底策略'));
+    final routeFinder = find.text('推理路线与兜底策略');
+    await tester.scrollUntilVisible(
+      routeFinder,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(routeFinder);
     await tester.pumpAndSettle();
 
     expect(find.text('纯端侧极速规则'), findsOneWidget);
@@ -170,7 +203,13 @@ void main() {
     await tester.pumpAndSettle();
 
     // Click "空闲内存回收" on desktop
-    await tester.tap(find.text('空闲内存回收'));
+    final desktopIdleFinder = find.text('空闲内存回收');
+    await tester.scrollUntilVisible(
+      desktopIdleFinder,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(desktopIdleFinder);
     await tester.pumpAndSettle();
 
     // Drawer is open on the right
@@ -184,7 +223,13 @@ void main() {
     expect(find.text('空闲内存回收策略'), findsNothing);
 
     // Click "模型管家" on desktop
-    await tester.tap(find.text('模型管家'));
+    final desktopModelMgrFinder = find.text('模型管家');
+    await tester.scrollUntilVisible(
+      desktopModelMgrFinder,
+      -200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(desktopModelMgrFinder);
     await tester.pumpAndSettle();
 
     expect(find.text('端侧模型管家'), findsOneWidget);
@@ -299,5 +344,346 @@ void main() {
 
     // Reset repository after test
     await AgendaRepository.instance.clearAll();
+  });
+
+  testWidgets('SettingsPage renders Cloud Engine card above On-Device Engine with risk modal, greyed state, service drawer, connection test and think switch',
+      (WidgetTester tester) async {
+    final prevHttpOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    AppSettingsService.instance.resetForTest();
+    AppSettingsService.instance.skipPersistForTest = true;
+    addTearDown(() {
+      HttpOverrides.global = prevHttpOverrides;
+      AppSettingsService.instance.resetForTest();
+      AIExtractorService.resetCloudStatus();
+    });
+
+    List<String> serverModels = [
+      'qwen-0.8',
+      'spark',
+      'oss',
+      'qwen-3.6',
+      'qwen-3.8',
+      'qwen-lite',
+    ];
+
+    HttpServer? server;
+    await tester.runAsync(() async {
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      server!.listen((req) async {
+        if (req.uri.path == '/v1/models') {
+          req.response.statusCode = 200;
+          req.response.headers.contentType = ContentType.json;
+          req.response.write(jsonEncode({
+            'object': 'list',
+            'data': serverModels.map((id) => {'id': id}).toList(),
+          }));
+          await req.response.close();
+          return;
+        }
+        req.response.statusCode = 404;
+        await req.response.close();
+      });
+    });
+    addTearDown(() async {
+      await tester.runAsync(() async => server?.close(force: true));
+    });
+
+    await tester.binding.setSurfaceSize(const Size(1100, 950));
+    addTearDown(() async => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            engineMode: AIEngineMode.hybridAuto,
+            onEngineModeChanged: (_) {},
+            engineIndicatorDetail: '引擎待命中',
+            onPreloadModel: () {},
+            onUnloadModel: () {},
+            localIps: const ['192.168.1.100'],
+            peerIpController: TextEditingController(),
+            onStateRefreshed: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. Verify "云端引擎" section appears above "端侧引擎"
+    final cloudHeaderY = tester.getTopLeft(find.text('云端引擎').last).dy;
+    final localHeaderY = tester.getTopLeft(find.text('端侧引擎').last).dy;
+    expect(cloudHeaderY, lessThan(localHeaderY));
+
+    // Verify rows exist
+    expect(find.text('启动云端引擎'), findsOneWidget);
+    expect(find.text('服务管家'), findsOneWidget);
+    expect(find.text('选择模型'), findsOneWidget);
+    expect(find.text('测试连接'), findsOneWidget);
+    expect(find.byKey(const Key('cloud_think_mode_switch')), findsOneWidget);
+
+    // 2. When disabled, lower rows are greyed out and disabled
+    final opacityWidget = tester.widget<Opacity>(
+      find.ancestor(
+        of: find.text('服务管家'),
+        matching: find.byType(Opacity),
+      ).first,
+    );
+    expect(opacityWidget.opacity, lessThan(1.0));
+
+    final testConnBtnBefore = tester.widget<OutlinedButton>(
+      find.ancestor(
+        of: find.text('测试连接'),
+        matching: find.byType(OutlinedButton),
+      ),
+    );
+    expect(testConnBtnBefore.onPressed, isNull);
+
+    final cloudThinkBefore = tester.widget<Switch>(
+      find.byKey(const Key('cloud_think_mode_switch')),
+    );
+    expect(cloudThinkBefore.onChanged, isNull);
+
+    // Tapping 服务管家 or 选择模型 while disabled must not open drawer
+    await tester.tap(find.text('服务管家'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.text('云端服务管家'), findsNothing);
+
+    await tester.tap(find.text('选择模型'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.text('模型选择'), findsNothing);
+
+    // 3. First tap on 启动云端引擎 shows risk warning modal
+    await tester.tap(find.byKey(const Key('cloud_engine_master_switch')));
+    await tester.pumpAndSettle();
+    expect(find.text('启用云端引擎风险提示'), findsOneWidget);
+    expect(find.text('知晓并开启'), findsOneWidget);
+
+    // Cancel keeps switch off
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.enableCloudEngine, isFalse);
+    expect(AppSettingsService.instance.cloudRiskAccepted, isFalse);
+
+    // Tap switch again and accept risk
+    await tester.tap(find.byKey(const Key('cloud_engine_master_switch')));
+    await tester.pumpAndSettle();
+    expect(find.text('启用云端引擎风险提示'), findsOneWidget);
+    await tester.tap(find.text('知晓并开启'));
+    await tester.pumpAndSettle();
+
+    expect(AppSettingsService.instance.enableCloudEngine, isTrue);
+    expect(AppSettingsService.instance.cloudRiskAccepted, isTrue);
+
+    // Lower rows are now active
+    final opacityEnabled = tester.widget<Opacity>(
+      find.ancestor(
+        of: find.text('服务管家'),
+        matching: find.byType(Opacity),
+      ).first,
+    );
+    expect(opacityEnabled.opacity, equals(1.0));
+
+    // Toggle off and back on: risk modal should NOT show again
+    await tester.tap(find.byKey(const Key('cloud_engine_master_switch')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.enableCloudEngine, isFalse);
+
+    await tester.tap(find.byKey(const Key('cloud_engine_master_switch')));
+    await tester.pumpAndSettle();
+    expect(find.text('启用云端引擎风险提示'), findsNothing);
+    expect(AppSettingsService.instance.enableCloudEngine, isTrue);
+
+    // 4. Open 服务管家 drawer (desktop right slide-out drawer at 1100px width)
+    await tester.tap(find.text('服务管家'));
+    await tester.pumpAndSettle();
+    expect(find.text('云端服务管家'), findsOneWidget);
+    expect(find.text('保存并测试'), findsOneWidget);
+    expect(find.text('取消'), findsOneWidget);
+
+    // Test 取消 closes drawer without saving
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('云端服务管家'), findsNothing);
+
+    // Re-open 服务管家, fill API URL & Key, tap 保存并测试 -> auto fetches models & goes to Step 2
+    await tester.tap(find.text('服务管家'));
+    await tester.pumpAndSettle();
+
+    final mockUrl = 'http://127.0.0.1:${server!.port}/v1';
+    await tester.enterText(
+      find.byKey(const Key('cloud_api_url_field')),
+      mockUrl,
+    );
+    await tester.enterText(
+      find.byKey(const Key('cloud_api_key_field')),
+      'sk-ui-test-key',
+    );
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('保存并测试'));
+    await tester.tap(find.text('保存并测试'));
+    await tester.pump();
+    for (var i = 0; i < 80; i++) {
+      if (AIExtractorService.cloudConnectionState !=
+          CloudConnectionState.testing) {
+        break;
+      }
+      await tester.runAsync(
+        () => Future.delayed(const Duration(milliseconds: 25)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    // Step 2: multi-select favorite models from dropdown
+    expect(find.text('收藏常用模型（可多选）'), findsOneWidget);
+    expect(find.byKey(const Key('cloud_favorite_models_dropdown')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('cloud_favorite_models_dropdown')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('dropdown_fav_item_qwen-0.8')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('dropdown_fav_item_spark')));
+    await tester.pumpAndSettle();
+
+    expect(AppSettingsService.instance.favoriteCloudModels,
+        ['qwen-0.8', 'spark']);
+
+    await tester.ensureVisible(find.text('完成'));
+    await tester.tap(find.text('完成'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('云端服务管家'), findsNothing);
+    expect(AppSettingsService.instance.cloudApiUrl, mockUrl);
+    expect(AppSettingsService.instance.cloudApiKey, 'sk-ui-test-key');
+    expect(
+      AIExtractorService.cloudConnectionState,
+      CloudConnectionState.connected,
+    );
+    expect(find.text('引擎已就绪'), findsOneWidget);
+
+    // 5. Open 选择模型 drawer (matches sketch: 拉取模型列表 + 收藏 + 全部)
+    await tester.tap(find.text('选择模型'));
+    await tester.pumpAndSettle();
+    expect(find.text('模型选择'), findsOneWidget);
+    expect(find.byKey(const Key('fetch_cloud_models_button')), findsOneWidget);
+    expect(find.text('收藏'), findsOneWidget);
+    expect(find.text('全部'), findsOneWidget);
+
+    // Toggle '+' on 'oss' in 全部 -> adds to favorites and turns icon into '-'
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('all_fav_toggle_oss')),
+        matching: find.byIcon(Icons.add_rounded),
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.byKey(const Key('all_fav_toggle_oss')));
+    await tester.tap(find.byKey(const Key('all_fav_toggle_oss')));
+    await tester.pumpAndSettle();
+
+    expect(AppSettingsService.instance.favoriteCloudModels,
+        ['qwen-0.8', 'spark', 'oss']);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('all_fav_toggle_oss')),
+        matching: find.byIcon(Icons.remove_rounded),
+      ),
+      findsOneWidget,
+    );
+
+    // Tap '-' on 'oss' -> removes from favorites and turns back to '+'
+    await tester.tap(find.byKey(const Key('all_fav_toggle_oss')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.favoriteCloudModels,
+        ['qwen-0.8', 'spark']);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('all_fav_toggle_oss')),
+        matching: find.byIcon(Icons.add_rounded),
+      ),
+      findsOneWidget,
+    );
+
+    // Tap blank area of 'qwen-3.6' in 全部 to select directly
+    await tester.ensureVisible(find.byKey(const Key('all_select_qwen-3.6')));
+    await tester.tap(find.byKey(const Key('all_select_qwen-3.6')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.cloudModelName, 'qwen-3.6');
+
+    // Tap 'spark' in 收藏 to select
+    await tester.ensureVisible(find.byKey(const Key('fav_select_spark')));
+    await tester.tap(find.byKey(const Key('fav_select_spark')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.cloudModelName, 'spark');
+
+    // Simulate updated server model list where 'spark' is removed
+    serverModels = ['qwen-0.8', 'qwen-3.6', 'qwen-lite'];
+    await tester.ensureVisible(find.byKey(const Key('fetch_cloud_models_button')));
+    await tester.tap(find.byKey(const Key('fetch_cloud_models_button')));
+    await tester.pump();
+    for (var i = 0; i < 80; i++) {
+      if (AIExtractorService.cloudConnectionState !=
+          CloudConnectionState.testing) {
+        break;
+      }
+      await tester.runAsync(
+        () => Future.delayed(const Duration(milliseconds: 25)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    // Unavailable favorite 'spark' is greyed out and cannot be tapped to select
+    final sparkOpacity = tester.widget<Opacity>(
+      find.descendant(
+        of: find.byKey(const Key('fav_model_row_spark')),
+        matching: find.byType(Opacity),
+      ),
+    );
+    expect(sparkOpacity.opacity, lessThan(1.0));
+    expect(
+      tester.widget<InkWell>(find.byKey(const Key('fav_select_spark'))).onTap,
+      isNull,
+    );
+
+    // Only delete button works on unavailable favorite
+    await tester.tap(find.byKey(const Key('fav_delete_spark')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.favoriteCloudModels, ['qwen-0.8']);
+
+    // Select 'qwen-0.8' and close drawer
+    await tester.tap(find.byKey(const Key('fav_select_qwen-0.8')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.cloudModelName, 'qwen-0.8');
+
+    await tester.tap(find.byTooltip('关闭面板'));
+    await tester.pumpAndSettle();
+
+    // 6. Direct 测试连接 button on status row
+    await tester.tap(find.text('测试连接'));
+    await tester.pump();
+    for (var i = 0; i < 80; i++) {
+      if (AIExtractorService.cloudConnectionState !=
+          CloudConnectionState.testing) {
+        break;
+      }
+      await tester.runAsync(
+        () => Future.delayed(const Duration(milliseconds: 25)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(
+      AIExtractorService.cloudConnectionState,
+      CloudConnectionState.connected,
+    );
+
+    // 7. Toggle cloud 深度思考模式 switch
+    await tester.tap(find.byKey(const Key('cloud_think_mode_switch')));
+    await tester.pumpAndSettle();
+    expect(AppSettingsService.instance.enableCloudThinkMode, isTrue);
   });
 }

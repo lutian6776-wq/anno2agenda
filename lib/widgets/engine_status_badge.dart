@@ -86,8 +86,9 @@ class EngineStatusBadge extends StatelessWidget {
               const SizedBox(height: 12),
               Text(
                 '• 当前推理路线: ${engineMode == AIEngineMode.hybridAuto ? "混合自动 (大模型优先+规则兜底)" : engineMode == AIEngineMode.builtInRuleEngine ? "纯端侧极速规则" : "强制大模型"}\n'
-                '• 选定模型: ${selectedModelName ?? "未选定"}\n'
-                '• 思考模式 (Think Mode): ${LocalModelManager.enableThinkMode ? "开启 (输出深度思考链)" : "关闭 (极速直出日程)"}\n'
+                '• 云端引擎: ${AIExtractorService.enableCloudEngine ? (AIExtractorService.isCloudEngineReadyToRoute ? "已开启 (${AIExtractorService.getEffectiveCloudModel()} · ${AIExtractorService.cloudConnectionState == CloudConnectionState.connected ? "已连通" : "待测试"})" : "已开启 (待配置凭据)") : "未开启 (纯端侧模式)"}\n'
+                '• 端侧模型: ${selectedModelName ?? "未选定"}\n'
+                '• 思考模式 (Think Mode): ${AIExtractorService.isCloudEngineReadyToRoute ? (AIExtractorService.enableCloudThinkMode ? "云端开启" : "云端关闭") : (LocalModelManager.enableThinkMode ? "端侧开启 (输出深度思考链)" : "端侧关闭 (极速直出日程)")}\n'
                 '• 空闲内存释放: ${LocalModelManager.idleUnloadMinutes > 0 ? "空闲 ${LocalModelManager.idleUnloadMinutes} 分钟后自动释放" : "永不释放 (保持常驻)"}',
                 style: const TextStyle(fontSize: 13, height: 1.6),
               ),

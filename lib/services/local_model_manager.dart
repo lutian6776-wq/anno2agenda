@@ -15,6 +15,7 @@ class BuiltInModelSpec {
   final int expectedSizeMB;
   final String description;
   final bool recommendedForMobile;
+  final bool desktopOnly;
 
   const BuiltInModelSpec({
     required this.id,
@@ -25,6 +26,7 @@ class BuiltInModelSpec {
     required this.expectedSizeMB,
     required this.description,
     this.recommendedForMobile = false,
+    this.desktopOnly = false,
   });
 }
 
@@ -77,26 +79,37 @@ class LocalModelManager {
     BuiltInModelSpec(
       id: 'spark-x2.5-1.7b',
       name: '讯飞星火 Spark-X2.5-1.7B',
-      tag: '推荐手机与轻薄本 · 约 1.1GB',
+      tag: '仅支持 Windows 桌面端 · 约 1.1GB',
       fileName: 'Spark-X2.5-1.7B-Q4_K_M.gguf',
       downloadUrl:
           'https://modelscope.cn/models/XHToken/Spark-X2.5-1.7B-GGUF/resolve/master/Spark-X2.5-1.7B-Q4_K_M.gguf',
       expectedSizeMB: 1140,
-      description: '科大讯飞星火轻量端侧模型，原生 100 万超长上下文与混合注意力架构，低功耗高能效，适合移动端日常通知拆解。',
-      recommendedForMobile: true,
+      description:
+          '科大讯飞星火轻量端侧模型，原生 100 万超长上下文与混合注意力架构，低功耗高能效。⚠️ 仅支持 Windows 桌面端最新引擎，手机端请使用 Qwen 系列。',
+      recommendedForMobile: false,
+      desktopOnly: true,
     ),
     BuiltInModelSpec(
       id: 'spark-x2.5-4b',
       name: '讯飞星火 Spark-X2.5-4B',
-      tag: '推荐桌面端与旗舰机 · 约 2.4GB',
+      tag: '仅支持 Windows 桌面端 · 约 2.4GB',
       fileName: 'Spark-X2.5-4B-Q4_K_M.gguf',
       downloadUrl:
           'https://modelscope.cn/models/XHToken/Spark-X2.5-4B-GGUF/resolve/master/Spark-X2.5-4B-Q4_K_M.gguf',
       expectedSizeMB: 2480,
-      description: '科大讯飞星火全能端侧模型，支持 100 万长上下文、复杂推理与工具调用，高精度提炼多日程长通知。',
+      description:
+          '科大讯飞星火全能端侧模型，支持 100 万长上下文、复杂推理与工具调用，高精度提炼多日程长通知。⚠️ 仅支持 Windows 桌面端最新引擎，手机端请使用 Qwen 系列。',
       recommendedForMobile: false,
+      desktopOnly: true,
     ),
   ];
+
+  /// 根据当前运行平台返回对用户可见的预置模型目录（移动端隐藏仅支持桌面端的模型）
+  static List<BuiltInModelSpec> visibleCatalog({bool? isMobile}) {
+    final mobile = isMobile ?? (Platform.isAndroid || Platform.isIOS);
+    if (!mobile) return catalog;
+    return catalog.where((spec) => !spec.desktopOnly).toList();
+  }
 
   static Process? _managedRuntimeProcess;
   static String? _cachedAndroidModelsDir;
@@ -301,6 +314,14 @@ class LocalModelManager {
           return false;
         }
 
+        final lowerPath = ggufFile.path.toLowerCase();
+        if (lowerPath.contains('spark')) {
+          onModelStatusChanged?.call(
+            '⚠️ 讯飞星火模型（spark2_5 架构）当前仅支持 Windows 桌面端运行，手机端请使用 Qwen 系列',
+          );
+          return false;
+        }
+
         _androidLlamaController ??= LlamaController();
         final controller = _androidLlamaController!;
         final alreadyLoaded = await controller.isModelLoaded();
@@ -401,7 +422,7 @@ class LocalModelManager {
             mode: ProcessStartMode.detached,
           );
 
-          for (var i = 0; i < 25; i++) {
+          for (var i = 0; i < 40; i++) {
             await Future.delayed(const Duration(milliseconds: 600));
             if (await isLlamaServerHealthy()) {
               _loadedWindowsModelPath = targetGguf.path;
@@ -724,6 +745,14 @@ class LocalModelManager {
     final ggufFile = await findLocalGgufFile(preferredModelId);
     if (ggufFile == null || !ggufFile.existsSync()) return null;
 
+    final lowerPath = ggufFile.path.toLowerCase();
+    if (lowerPath.contains('spark')) {
+      onToken?.call(
+        '⚠️ 讯飞星火模型（spark2_5 架构）当前仅支持 Windows 桌面端运行，手机端请使用 Qwen 系列',
+      );
+      return null;
+    }
+
     // 模型文件完整性保护（至少 10MB）
     try {
       if (ggufFile.lengthSync() < 10 * 1024 * 1024) {
@@ -1042,6 +1071,11 @@ class LocalModelManager {
     var cleaned = raw
         .replaceAll('<|im_end|>', '')
         .replaceAll('<|endoftext|>', '')
+        .replaceAll('<｜end of sentence｜>', '')
+        .replaceAll('<｜start of sentence｜>', '')
+        .replaceAll('<|Bot|>', '')
+        .replaceAll('<|User|>', '')
+        .replaceAll('<|System|>', '')
         .replaceAll('```json', '')
         .replaceAll('```', '')
         .trim();
@@ -1094,7 +1128,7 @@ class LocalModelManager {
     // 1. Android 端：直接扫描手机沙盒内已下载的 GGUF 模型（由内置 llama_flutter_android 引擎直接加载）
     if (Platform.isAndroid) {
       final androidModels = <String>[];
-      for (final spec in catalog) {
+      for (final spec in visibleCatalog()) {
         if (await isModelDownloaded(spec)) {
           androidModels.add(spec.id);
         }
@@ -1102,6 +1136,7 @@ class LocalModelManager {
       final extraFiles = await listDownloadedGgufFiles();
       for (final f in extraFiles) {
         final name = f.path.split(Platform.pathSeparator).last;
+        if (name.toLowerCase().contains('spark')) continue;
         final matchedSpec = catalog
             .where((s) => s.fileName.toLowerCase() == name.toLowerCase());
         if (matchedSpec.isEmpty && !androidModels.contains(name)) {
@@ -1392,6 +1427,18 @@ class LocalModelManager {
     required BuiltInModelSpec spec,
     void Function(ModelDownloadProgress progress)? onProgress,
   }) async {
+    // 移动端严禁下载仅支持桌面端的架构模型，防止浪费流量与存储空间
+    if ((Platform.isAndroid || Platform.isIOS) && spec.desktopOnly) {
+      onProgress?.call(ModelDownloadProgress(
+        modelId: spec.id,
+        receivedBytes: 0,
+        totalBytes: spec.expectedSizeMB * 1024 * 1024,
+        speedMBps: 0,
+        error: '该模型仅支持 Windows 桌面端运行，手机端已禁用下载',
+      ));
+      return;
+    }
+
     // 防止重复触发同个模型的下载任务
     if (isModelDownloading(spec.id)) {
       return;

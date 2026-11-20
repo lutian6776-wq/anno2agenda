@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/inference_terminal_model.dart';
@@ -175,7 +174,6 @@ class _InferenceTerminalState extends State<InferenceTerminal>
     final tokens = _effectiveStreamedTokens;
     final isThinking = _effectiveExtracting;
     final tokenCount = _effectiveTokenCount;
-    final elapsedSec = _effectiveElapsedSeconds;
     final content = _displayContent;
 
     // 当空闲且无任何日志/Token 时不占用空间

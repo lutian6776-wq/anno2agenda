@@ -134,7 +134,7 @@ class _ModelCenterViewState extends State<ModelCenterView> {
     }
     final downloaded = <String>{};
     final partial = <String, double>{};
-    for (final spec in LocalModelManager.catalog) {
+    for (final spec in LocalModelManager.visibleCatalog()) {
       if (await LocalModelManager.isModelDownloaded(spec)) {
         downloaded.add(spec.id);
       }
@@ -145,8 +145,12 @@ class _ModelCenterViewState extends State<ModelCenterView> {
     }
     final models = await LocalModelManager.ensureLocalRuntimeAndListModels();
     final allFiles = await LocalModelManager.listDownloadedGgufFiles();
+    final isMobile = Platform.isAndroid || Platform.isIOS;
     final custom = allFiles.where((f) {
       final name = f.path.split(Platform.pathSeparator).last;
+      if (isMobile && name.toLowerCase().contains('spark')) {
+        return false;
+      }
       return !LocalModelManager.catalog.any(
           (s) => s.fileName.toLowerCase() == name.toLowerCase());
     }).toList();
@@ -313,7 +317,7 @@ class _ModelCenterViewState extends State<ModelCenterView> {
         const SizedBox(height: 8),
 
         // 3. 模型卡片列表
-        ...LocalModelManager.catalog.map((spec) {
+        ...LocalModelManager.visibleCatalog().map((spec) {
           final isDownloaded = _downloadedSpecIds.contains(spec.id);
           final partMB = _partialCacheMB[spec.id] ?? 0.0;
           final downloadProgress = _activeDownloads[spec.id];
@@ -504,10 +508,18 @@ class _ModelCenterViewState extends State<ModelCenterView> {
                               ? null
                               : () async {
                                   _showSnack('⏳ 正在挂载并预热模型：${spec.name}...');
-                                  await LocalModelManager.preloadModel(
+                                  final ok = await LocalModelManager.preloadModel(
                                     preferredModelId: spec.id,
                                   );
                                   await _refresh();
+                                  if (!ok) {
+                                    if (Platform.isAndroid && spec.id.contains('spark')) {
+                                      _showSnack('⚠️ 讯飞星火模型当前仅支持 Windows 桌面端运行，手机端请使用 Qwen 系列');
+                                    } else {
+                                      _showSnack('⚠️ 挂载失败，请检查显存或模型文件');
+                                    }
+                                    return;
+                                  }
                                   if (mounted) {
                                     setState(
                                         () => _selectedModelName = spec.id);
