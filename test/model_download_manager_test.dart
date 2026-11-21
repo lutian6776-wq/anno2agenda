@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:anno2agenda/services/local_model_manager.dart';
 
@@ -91,5 +92,238 @@ void main() {
         .toSet();
     expect(desktopIds.contains('spark-x2.5-1.7b'), isTrue);
     expect(desktopIds.contains('spark-x2.5-4b'), isTrue);
+  });
+
+  group('Windows llama-server backend selection and fallback', () {
+    late int savedContextSize;
+
+    setUp(() {
+      savedContextSize = LocalModelManager.contextSize;
+      LocalModelManager.resetWindowsRuntimeStateForTest();
+    });
+
+    tearDown(() {
+      LocalModelManager.contextSize = savedContextSize;
+      LocalModelManager.resetWindowsRuntimeStateForTest();
+    });
+
+    test('resolveWindowsContextSize enforces minimum 4096 and respects larger contextSize', () {
+      LocalModelManager.contextSize = 2048;
+      expect(LocalModelManager.resolveWindowsContextSize(), 4096);
+
+      LocalModelManager.contextSize = 8192;
+      expect(LocalModelManager.resolveWindowsContextSize(), 8192);
+    });
+
+    test('buildWindowsLlamaServerArgs uses -ngl auto for GPU and -ngl 0 --device none for CPU', () {
+      LocalModelManager.contextSize = 2048;
+      final gpuArgs = LocalModelManager.buildWindowsLlamaServerArgs(
+        modelPath: r'C:\models\qwen.gguf',
+        useGpu: true,
+      );
+      expect(gpuArgs, containsAllInOrder(['-m', r'C:\models\qwen.gguf']));
+      expect(gpuArgs, containsAllInOrder(['-c', '4096']));
+      expect(gpuArgs, containsAllInOrder(['-ngl', 'auto']));
+      expect(gpuArgs.contains('--device'), isFalse);
+
+      final cpuArgs = LocalModelManager.buildWindowsLlamaServerArgs(
+        modelPath: r'C:\models\qwen.gguf',
+        useGpu: false,
+        ctxSize: 8192,
+      );
+      expect(cpuArgs, containsAllInOrder(['-c', '8192']));
+      expect(cpuArgs, containsAllInOrder(['-ngl', '0', '--device', 'none']));
+    });
+
+    test('buildWindowsLaunchPlan and isWindowsBackendCompatible cover all DesktopBackendMode values', () {
+      expect(
+        LocalModelManager.buildWindowsLaunchPlan(
+          DesktopBackendMode.autoGpuFallbackCpu,
+        ),
+        [true, false],
+      );
+      expect(
+        LocalModelManager.buildWindowsLaunchPlan(DesktopBackendMode.cpuOnly),
+        [false],
+      );
+      expect(
+        LocalModelManager.buildWindowsLaunchPlan(DesktopBackendMode.gpuOnly),
+        [true],
+      );
+
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.autoGpuFallbackCpu,
+          activeBackend: null,
+        ),
+        isFalse,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.autoGpuFallbackCpu,
+          activeBackend: 'gpu',
+        ),
+        isTrue,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.autoGpuFallbackCpu,
+          activeBackend: 'cpu',
+        ),
+        isTrue,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.cpuOnly,
+          activeBackend: 'gpu',
+        ),
+        isFalse,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.cpuOnly,
+          activeBackend: 'cpu',
+        ),
+        isTrue,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.gpuOnly,
+          activeBackend: 'cpu',
+        ),
+        isFalse,
+      );
+      expect(
+        LocalModelManager.isWindowsBackendCompatible(
+          preference: DesktopBackendMode.gpuOnly,
+          activeBackend: 'gpu',
+        ),
+        isTrue,
+      );
+    });
+
+    test('autoGpuFallbackCpu succeeds directly on GPU in 1 attempt when GPU works', () async {
+      final attempts = <List<String>>[];
+      LocalModelManager.desktopBackendMode =
+          DesktopBackendMode.autoGpuFallbackCpu;
+      LocalModelManager.windowsServerAttemptRunnerForTest = ({
+        required String executablePath,
+        required List<String> args,
+        required String workingDirectory,
+        required Map<String, String> environment,
+        required bool useGpu,
+        required int maxPolls,
+        required Duration pollInterval,
+      }) async {
+        attempts.add(args);
+        return true;
+      };
+
+      final ok = await LocalModelManager.startWindowsLlamaServerForTest(
+        bundledServer: File(r'D:\runtime\llama-server.exe'),
+        targetGguf: File(r'D:\models\Qwen3.5-0.8B-Q4_K_M.gguf'),
+        targetModelId: 'qwen3.5-0.8b',
+      );
+
+      expect(ok, isTrue);
+      expect(attempts.length, 1);
+      expect(attempts.first, containsAllInOrder(['-ngl', 'auto']));
+      expect(LocalModelManager.activeWindowsBackend, 'gpu');
+      expect(LocalModelManager.lastWindowsStartFellBackToCpu, isFalse);
+      expect(LocalModelManager.currentlyLoadedModelId, 'qwen3.5-0.8b');
+    });
+
+    test('autoGpuFallbackCpu falls back to pure CPU when GPU attempt fails', () async {
+      final attempts = <List<String>>[];
+      final statuses = <String>[];
+      LocalModelManager.desktopBackendMode =
+          DesktopBackendMode.autoGpuFallbackCpu;
+      LocalModelManager.onModelStatusChanged = statuses.add;
+      LocalModelManager.windowsServerAttemptRunnerForTest = ({
+        required String executablePath,
+        required List<String> args,
+        required String workingDirectory,
+        required Map<String, String> environment,
+        required bool useGpu,
+        required int maxPolls,
+        required Duration pollInterval,
+      }) async {
+        attempts.add(args);
+        return !useGpu;
+      };
+
+      final ok = await LocalModelManager.startWindowsLlamaServerForTest(
+        bundledServer: File(r'D:\runtime\llama-server.exe'),
+        targetGguf: File(r'D:\models\Qwen3.5-0.8B-Q4_K_M.gguf'),
+        targetModelId: 'qwen3.5-0.8b',
+      );
+
+      expect(ok, isTrue);
+      expect(attempts.length, 2);
+      expect(attempts[0], containsAllInOrder(['-ngl', 'auto']));
+      expect(attempts[1], containsAllInOrder(['-ngl', '0', '--device', 'none']));
+      expect(LocalModelManager.activeWindowsBackend, 'cpu');
+      expect(LocalModelManager.lastWindowsStartFellBackToCpu, isTrue);
+      expect(statuses.any((s) => s.contains('自动降级为纯 CPU')), isTrue);
+      expect(statuses.last, contains('CPU 兜底模式'));
+    });
+
+    test('gpuOnly stops after 1 failed attempt without falling back to CPU', () async {
+      final attempts = <List<String>>[];
+      LocalModelManager.desktopBackendMode = DesktopBackendMode.gpuOnly;
+      LocalModelManager.windowsServerAttemptRunnerForTest = ({
+        required String executablePath,
+        required List<String> args,
+        required String workingDirectory,
+        required Map<String, String> environment,
+        required bool useGpu,
+        required int maxPolls,
+        required Duration pollInterval,
+      }) async {
+        attempts.add(args);
+        return false;
+      };
+
+      final ok = await LocalModelManager.startWindowsLlamaServerForTest(
+        bundledServer: File(r'D:\runtime\llama-server.exe'),
+        targetGguf: File(r'D:\models\Qwen3.5-0.8B-Q4_K_M.gguf'),
+        targetModelId: 'qwen3.5-0.8b',
+      );
+
+      expect(ok, isFalse);
+      expect(attempts.length, 1);
+      expect(attempts.first, containsAllInOrder(['-ngl', 'auto']));
+      expect(LocalModelManager.activeWindowsBackend, isNull);
+      expect(LocalModelManager.lastWindowsStartFellBackToCpu, isFalse);
+    });
+
+    test('cpuOnly starts directly in CPU mode without trying GPU', () async {
+      final attempts = <List<String>>[];
+      LocalModelManager.desktopBackendMode = DesktopBackendMode.cpuOnly;
+      LocalModelManager.windowsServerAttemptRunnerForTest = ({
+        required String executablePath,
+        required List<String> args,
+        required String workingDirectory,
+        required Map<String, String> environment,
+        required bool useGpu,
+        required int maxPolls,
+        required Duration pollInterval,
+      }) async {
+        attempts.add(args);
+        return true;
+      };
+
+      final ok = await LocalModelManager.startWindowsLlamaServerForTest(
+        bundledServer: File(r'D:\runtime\llama-server.exe'),
+        targetGguf: File(r'D:\models\Qwen3.5-0.8B-Q4_K_M.gguf'),
+        targetModelId: 'qwen3.5-0.8b',
+      );
+
+      expect(ok, isTrue);
+      expect(attempts.length, 1);
+      expect(attempts.first, containsAllInOrder(['-ngl', '0', '--device', 'none']));
+      expect(LocalModelManager.activeWindowsBackend, 'cpu');
+      expect(LocalModelManager.lastWindowsStartFellBackToCpu, isFalse);
+    });
   });
 }

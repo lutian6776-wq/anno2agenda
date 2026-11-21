@@ -686,4 +686,61 @@ void main() {
     await tester.pumpAndSettle();
     expect(AppSettingsService.instance.enableCloudThinkMode, isTrue);
   });
+
+  testWidgets('SettingsPage on Windows allows switching desktop hardware acceleration backend',
+      (WidgetTester tester) async {
+    if (!Platform.isWindows) return;
+
+    addTearDown(() async {
+      LocalModelManager.resetWindowsRuntimeStateForTest();
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    await tester.binding.setSurfaceSize(const Size(1100, 950));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            engineMode: AIEngineMode.hybridAuto,
+            onEngineModeChanged: (_) {},
+            engineIndicatorDetail: '引擎待命中',
+            onPreloadModel: () {},
+            onUnloadModel: () {},
+            localIps: const ['192.168.1.100'],
+            peerIpController: TextEditingController(),
+            onStateRefreshed: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final backendTileFinder = find.text('推理硬件加速');
+    await tester.scrollUntilVisible(
+      backendTileFinder,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(backendTileFinder, findsOneWidget);
+    expect(find.text('自动 (GPU优先)'), findsOneWidget);
+
+    await tester.tap(backendTileFinder);
+    await tester.pumpAndSettle();
+
+    expect(find.text('桌面端推理硬件加速'), findsOneWidget);
+    expect(find.text('自动模式 (GPU 优先 · CPU 兜底)'), findsOneWidget);
+    expect(find.text('纯 CPU 模式 (省显存 · 高兼容)'), findsOneWidget);
+    expect(find.text('仅 GPU 模式 (高性能 · 不降级)'), findsOneWidget);
+
+    await tester.tap(find.text('纯 CPU 模式 (省显存 · 高兼容)'));
+    await tester.pumpAndSettle();
+
+    expect(LocalModelManager.desktopBackendMode, DesktopBackendMode.cpuOnly);
+    expect(
+      AppSettingsService.instance.desktopBackendMode,
+      DesktopBackendMode.cpuOnly,
+    );
+    expect(find.text('纯 CPU'), findsOneWidget);
+  });
 }

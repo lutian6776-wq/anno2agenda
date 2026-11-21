@@ -26,6 +26,11 @@ void main() {
     await service.init(tempDir.path);
 
     // Initial default values verify
+    expect(service.desktopBackendMode, DesktopBackendMode.autoGpuFallbackCpu);
+    expect(
+      LocalModelManager.desktopBackendMode,
+      DesktopBackendMode.autoGpuFallbackCpu,
+    );
     expect(service.contextSize, 2048);
     expect(service.maxThinkingTokens, 1536);
     expect(service.temperature, 0.30);
@@ -34,6 +39,7 @@ void main() {
 
     // 1. Modify settings
     await service.setEngineMode(AIEngineMode.localLlmServer);
+    await service.setDesktopBackendMode(DesktopBackendMode.cpuOnly);
     await service.setIdleUnloadMinutes(10);
     await service.setEnableThinkMode(true);
     await service.setAutoPreloadOnOverlayExpand(false);
@@ -55,6 +61,7 @@ void main() {
     expect(AIExtractorService.enableGbnfConstraint, false);
 
     expect(LocalModelManager.idleUnloadMinutes, 10);
+    expect(LocalModelManager.desktopBackendMode, DesktopBackendMode.cpuOnly);
     expect(LocalModelManager.enableThinkMode, true);
     expect(LocalModelManager.autoPreloadOnOverlayExpand, false);
     expect(LocalModelManager.contextSize, 8192);
@@ -69,6 +76,7 @@ void main() {
 
     final content = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
     expect(content['engineMode'], 'localLlmServer');
+    expect(content['desktopBackendMode'], 'cpuOnly');
     expect(content['idleUnloadMinutes'], 10);
     expect(content['enableThinkMode'], true);
     expect(content['contextSize'], 8192);
@@ -153,5 +161,31 @@ void main() {
         ['deepseek-chat', 'deepseek-reasoner']);
     expect(service.fetchedCloudModels, ['deepseek-chat']);
     expect(AIExtractorService.isCloudEngineReadyToRoute, isTrue);
+  });
+
+  test('AppSettingsService persists and restores desktopBackendMode across reload', () async {
+    final service = AppSettingsService.instance;
+    await service.init(tempDir.path);
+
+    expect(service.desktopBackendMode, DesktopBackendMode.autoGpuFallbackCpu);
+    expect(
+      LocalModelManager.desktopBackendMode,
+      DesktopBackendMode.autoGpuFallbackCpu,
+    );
+
+    await service.setDesktopBackendMode(DesktopBackendMode.cpuOnly);
+    expect(service.desktopBackendMode, DesktopBackendMode.cpuOnly);
+    expect(LocalModelManager.desktopBackendMode, DesktopBackendMode.cpuOnly);
+
+    service.resetForTest();
+    expect(service.desktopBackendMode, DesktopBackendMode.autoGpuFallbackCpu);
+    expect(
+      LocalModelManager.desktopBackendMode,
+      DesktopBackendMode.autoGpuFallbackCpu,
+    );
+
+    await service.init(tempDir.path);
+    expect(service.desktopBackendMode, DesktopBackendMode.cpuOnly);
+    expect(LocalModelManager.desktopBackendMode, DesktopBackendMode.cpuOnly);
   });
 }
