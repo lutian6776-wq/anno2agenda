@@ -106,3 +106,38 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# Bundle trimmed llama-server runtime (Vulkan + CPU backends) next to executable
+set(LLAMA_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../runtime")
+if(EXISTS "${LLAMA_RUNTIME_SOURCE_DIR}")
+  install(CODE "
+    file(REMOVE_RECURSE \"${INSTALL_BUNDLE_LIB_DIR}/runtime\")
+    " COMPONENT Runtime)
+  install(DIRECTORY "${LLAMA_RUNTIME_SOURCE_DIR}/"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/runtime"
+    COMPONENT Runtime
+    PATTERN "*.zip" EXCLUDE
+    PATTERN "*.7z" EXCLUDE
+    PATTERN "*.tar.gz" EXCLUDE
+    PATTERN "llama-batched-bench*" EXCLUDE
+    PATTERN "llama-bench*" EXCLUDE
+    PATTERN "llama-cli*" EXCLUDE
+    PATTERN "llama-completion*" EXCLUDE
+    PATTERN "llama-connect.exe" EXCLUDE
+    PATTERN "llama-fit-params*" EXCLUDE
+    PATTERN "llama-gemma3-cli.exe" EXCLUDE
+    PATTERN "llama-gguf-split.exe" EXCLUDE
+    PATTERN "llama-imatrix.exe" EXCLUDE
+    PATTERN "llama-llava-cli.exe" EXCLUDE
+    PATTERN "llama-minicpmv-cli.exe" EXCLUDE
+    PATTERN "llama-mtmd-*" EXCLUDE
+    PATTERN "llama-perplexity*" EXCLUDE
+    PATTERN "llama-quantize*" EXCLUDE
+    PATTERN "llama-qwen2vl-cli.exe" EXCLUDE
+    PATTERN "llama-results.exe" EXCLUDE
+    PATTERN "llama-tokenize.exe" EXCLUDE
+    PATTERN "llama-tts.exe" EXCLUDE
+    PATTERN "llama.exe" EXCLUDE
+    PATTERN "ggml-rpc-server.exe" EXCLUDE
+    PATTERN "ggml-rpc.dll" EXCLUDE)
+endif()
