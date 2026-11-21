@@ -19,6 +19,8 @@ class AppSettingsService {
 
   // --- 配置项定义及默认值 ---
   AIEngineMode _engineMode = AIEngineMode.hybridAuto;
+  DesktopBackendMode _desktopBackendMode =
+      DesktopBackendMode.autoGpuFallbackCpu;
   int _idleUnloadMinutes = 5;
   bool _enableThinkMode = false;
   bool _autoPreloadOnOverlayExpand = true;
@@ -47,6 +49,7 @@ class AppSettingsService {
 
   // Getters
   AIEngineMode get engineMode => _engineMode;
+  DesktopBackendMode get desktopBackendMode => _desktopBackendMode;
   int get idleUnloadMinutes => _idleUnloadMinutes;
   bool get enableThinkMode => _enableThinkMode;
   bool get autoPreloadOnOverlayExpand => _autoPreloadOnOverlayExpand;
@@ -121,6 +124,7 @@ class AppSettingsService {
 
   void _resetToDefaults() {
     _engineMode = AIEngineMode.hybridAuto;
+    _desktopBackendMode = DesktopBackendMode.autoGpuFallbackCpu;
     _idleUnloadMinutes = 5;
     _enableThinkMode = false;
     _autoPreloadOnOverlayExpand = true;
@@ -160,6 +164,14 @@ class AppSettingsService {
                 'builtInRuleEngine' => AIEngineMode.builtInRuleEngine,
                 'localLlmServer' => AIEngineMode.localLlmServer,
                 _ => AIEngineMode.hybridAuto,
+              };
+            }
+            if (decoded.containsKey('desktopBackendMode')) {
+              final backendStr = decoded['desktopBackendMode']?.toString();
+              _desktopBackendMode = switch (backendStr) {
+                'cpuOnly' => DesktopBackendMode.cpuOnly,
+                'gpuOnly' => DesktopBackendMode.gpuOnly,
+                _ => DesktopBackendMode.autoGpuFallbackCpu,
               };
             }
             if (decoded.containsKey('idleUnloadMinutes')) {
@@ -279,6 +291,7 @@ class AppSettingsService {
     AIExtractorService.favoriteCloudModels = List.from(_favoriteCloudModels);
     AIExtractorService.fetchedCloudModels = List.from(_fetchedCloudModels);
 
+    LocalModelManager.desktopBackendMode = _desktopBackendMode;
     LocalModelManager.idleUnloadMinutes = _idleUnloadMinutes;
     LocalModelManager.enableThinkMode = _enableThinkMode;
     LocalModelManager.autoPreloadOnOverlayExpand = _autoPreloadOnOverlayExpand;
@@ -297,6 +310,7 @@ class AppSettingsService {
       final file = await _resolveSettingsFile();
       final data = {
         'engineMode': _engineMode.name,
+        'desktopBackendMode': _desktopBackendMode.name,
         'idleUnloadMinutes': _idleUnloadMinutes,
         'enableThinkMode': _enableThinkMode,
         'autoPreloadOnOverlayExpand': _autoPreloadOnOverlayExpand,
@@ -330,6 +344,12 @@ class AppSettingsService {
   Future<void> setEngineMode(AIEngineMode mode) async {
     _engineMode = mode;
     AIExtractorService.currentEngineMode = mode;
+    await save();
+  }
+
+  Future<void> setDesktopBackendMode(DesktopBackendMode mode) async {
+    _desktopBackendMode = mode;
+    LocalModelManager.desktopBackendMode = mode;
     await save();
   }
 
