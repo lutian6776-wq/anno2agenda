@@ -51,6 +51,18 @@ class ModelDownloadProgress {
       totalBytes > 0 ? (receivedBytes / totalBytes).clamp(0.0, 1.0) : 0.0;
 }
 
+/// Windows 桌面端本地 llama-server 硬件加速后端策略
+enum DesktopBackendMode {
+  /// 优先尝试 GPU (Vulkan / CUDA) 自适应卸载，失败或崩溃时自动降级为纯 CPU
+  autoGpuFallbackCpu,
+
+  /// 强制纯 CPU 模式 (-ngl 0 --device none)，零显存占用、最高兼容性
+  cpuOnly,
+
+  /// 强制 GPU 加速模式 (-ngl auto)，失败时不自动降级到 CPU
+  gpuOnly,
+}
+
 class LocalModelManager {
   /// 国内高速直链模型库（包含 Qwen3.5 与讯飞星火 Spark-X2.5 端侧量化模型，对接阿里云魔搭 ModelScope 直链）
   static const List<BuiltInModelSpec> catalog = [
@@ -147,6 +159,27 @@ class LocalModelManager {
   /// Windows 端独立守护进程中当前挂载的模型文件路径
   static String? _loadedWindowsModelPath;
   static String? get loadedWindowsModelPath => _loadedWindowsModelPath;
+
+  /// Windows 桌面端硬件加速策略与实际运行后端状态
+  static DesktopBackendMode desktopBackendMode =
+      DesktopBackendMode.autoGpuFallbackCpu;
+  static String? _activeWindowsBackend;
+  static String? get activeWindowsBackend => _activeWindowsBackend;
+  static bool _lastWindowsStartFellBackToCpu = false;
+  static bool get lastWindowsStartFellBackToCpu =>
+      _lastWindowsStartFellBackToCpu;
+  static int? _loadedWindowsContextSize;
+
+  @visibleForTesting
+  static Future<bool> Function({
+    required String executablePath,
+    required List<String> args,
+    required String workingDirectory,
+    required Map<String, String> environment,
+    required bool useGpu,
+    required int maxPolls,
+    required Duration pollInterval,
+  })? windowsServerAttemptRunnerForTest;
 
   /// 模型常驻与生命周期状态
   static bool _isModelLoading = false;
@@ -288,6 +321,268 @@ class LocalModelManager {
     }
   }
 
+  /// 计算 Windows 本地 llama-server 使用的上下文窗口大小（不低于 4096）
+  static int resolveWindowsContextSize() =>
+      contextSize > 4096 ? contextSize : 4096;
+
+  /// 构建 Windows 本地 llama-server 启动参数
+  static List<String> buildWindowsLlamaServerArgs({
+    required String modelPath,
+    required bool useGpu,
+    int port = 11434,
+    int? ctxSize,
+  }) {
+    final effectiveCtx = ctxSize ?? resolveWindowsContextSize();
+    return <String>[
+      '-m',
+      modelPath,
+      '--port',
+      '$port',
+      '--host',
+      '0.0.0.0',
+      '-c',
+      '$effectiveCtx',
+      if (useGpu) ...['-ngl', 'auto'] else ...['-ngl', '0', '--device', 'none'],
+    ];
+  }
+
+  /// 根据桌面端后端策略生成启动尝试顺序（true = GPU 自适应，false = 纯 CPU）
+  static List<bool> buildWindowsLaunchPlan(DesktopBackendMode mode) {
+    return switch (mode) {
+      DesktopBackendMode.autoGpuFallbackCpu => const [true, false],
+      DesktopBackendMode.cpuOnly => const [false],
+      DesktopBackendMode.gpuOnly => const [true],
+    };
+  }
+
+  /// 判断当前运行中的后端（'gpu' / 'cpu'）是否符合目标策略偏好
+  static bool isWindowsBackendCompatible({
+    required DesktopBackendMode preference,
+    required String? activeBackend,
+  }) {
+    if (activeBackend == null) return false;
+    return switch (preference) {
+      DesktopBackendMode.cpuOnly => activeBackend == 'cpu',
+      DesktopBackendMode.gpuOnly => activeBackend == 'gpu',
+      DesktopBackendMode.autoGpuFallbackCpu =>
+        activeBackend == 'gpu' || activeBackend == 'cpu',
+    };
+  }
+
+  static Future<void> _stopManagedWindowsRuntime({
+    bool killByImageName = true,
+  }) async {
+    if (_managedRuntimeProcess != null) {
+      try {
+        _managedRuntimeProcess!.kill();
+      } catch (_) {}
+      _managedRuntimeProcess = null;
+    }
+    final isTestMode = windowsServerAttemptRunnerForTest != null;
+    if (killByImageName && !isTestMode) {
+      try {
+        await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
+      } catch (_) {}
+    }
+    _loadedWindowsModelPath = null;
+    _activeWindowsBackend = null;
+    _loadedWindowsContextSize = null;
+    _lastWindowsStartFellBackToCpu = false;
+    if (!isTestMode) {
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+  }
+
+  static Future<bool> _runSingleWindowsServerAttempt({
+    required String executablePath,
+    required List<String> args,
+    required String workingDirectory,
+    required Map<String, String> environment,
+    required bool useGpu,
+    required int maxPolls,
+    required Duration pollInterval,
+  }) async {
+    Process process;
+    try {
+      process = await Process.start(
+        executablePath,
+        args,
+        workingDirectory: workingDirectory,
+        environment: environment,
+        mode: ProcessStartMode.normal,
+      );
+    } catch (e) {
+      debugPrint('[LocalModelManager] 启动 llama-server 进程失败 (useGpu=$useGpu): $e');
+      return false;
+    }
+
+    _managedRuntimeProcess = process;
+    unawaited(process.stdout.drain<void>().catchError((_) {}));
+
+    final stderrTail = <String>[];
+    process.stderr
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .transform(const LineSplitter())
+        .listen(
+          (line) {
+            stderrTail.add(line);
+            if (stderrTail.length > 20) {
+              stderrTail.removeAt(0);
+            }
+          },
+          onError: (_) {},
+          cancelOnError: false,
+        );
+
+    int? exitedCode;
+    unawaited(process.exitCode.then((code) => exitedCode = code));
+
+    for (var i = 0; i < maxPolls; i++) {
+      await Future.delayed(pollInterval);
+      if (exitedCode != null) {
+        debugPrint(
+          '[LocalModelManager] llama-server 提前退出 (code=$exitedCode, useGpu=$useGpu): ${stderrTail.join(' | ')}',
+        );
+        return false;
+      }
+      if (await isLlamaServerHealthy()) {
+        return true;
+      }
+    }
+
+    debugPrint(
+      '[LocalModelManager] llama-server 启动健康检查超时 (useGpu=$useGpu): ${stderrTail.join(' | ')}',
+    );
+    return false;
+  }
+
+  static Future<bool> _startWindowsLlamaServer({
+    required File bundledServer,
+    required File targetGguf,
+    required String targetModelId,
+    int maxPollsPerAttempt = 40,
+    bool emitStatus = true,
+  }) async {
+    final runtimeDir = bundledServer.parent.path;
+    final cleanEnv = Map<String, String>.from(Platform.environment)
+      ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
+      ..['HTTP_PROXY'] = ''
+      ..['HTTPS_PROXY'] = ''
+      ..['http_proxy'] = ''
+      ..['https_proxy'] = ''
+      ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
+
+    final effectiveCtx = resolveWindowsContextSize();
+    final plan = buildWindowsLaunchPlan(desktopBackendMode);
+    final fileName = targetGguf.path.split(RegExp(r'[\\/]')).last;
+    final runner =
+        windowsServerAttemptRunnerForTest ?? _runSingleWindowsServerAttempt;
+
+    for (var idx = 0; idx < plan.length; idx++) {
+      await _stopManagedWindowsRuntime();
+      final useGpu = plan[idx];
+      final isFallbackAttempt = idx > 0 && !useGpu;
+
+      if (emitStatus) {
+        if (isFallbackAttempt) {
+          onModelStatusChanged?.call(
+            '⚠️ GPU 加速启动失败，正在自动降级为纯 CPU 模式: $fileName...',
+          );
+        } else if (useGpu) {
+          onModelStatusChanged?.call(
+            '⏳ 正在加载模型权重至 GPU (自适应显存): $fileName...',
+          );
+        } else {
+          onModelStatusChanged?.call(
+            '⏳ 正在加载模型权重至 CPU: $fileName...',
+          );
+        }
+      }
+
+      final args = buildWindowsLlamaServerArgs(
+        modelPath: targetGguf.path,
+        useGpu: useGpu,
+        ctxSize: effectiveCtx,
+      );
+
+      final ok = await runner(
+        executablePath: bundledServer.path,
+        args: args,
+        workingDirectory: runtimeDir,
+        environment: cleanEnv,
+        useGpu: useGpu,
+        maxPolls: maxPollsPerAttempt,
+        pollInterval: const Duration(milliseconds: 600),
+      );
+
+      if (ok) {
+        _loadedWindowsModelPath = targetGguf.path;
+        _loadedWindowsContextSize = effectiveCtx;
+        _activeWindowsBackend = useGpu ? 'gpu' : 'cpu';
+        _lastWindowsStartFellBackToCpu = isFallbackAttempt;
+        _currentlyLoadedModelId = targetModelId;
+        markActivity();
+
+        if (emitStatus) {
+          final suffix = isFallbackAttempt
+              ? ' · CPU 兜底模式'
+              : (useGpu ? ' · GPU 加速' : ' · CPU 模式');
+          onModelStatusChanged?.call(
+            '🟢 本地模型已就绪 (${getModelDisplayName(targetModelId)}$suffix)',
+          );
+        }
+        return true;
+      }
+
+      await _stopManagedWindowsRuntime();
+    }
+
+    if (emitStatus) {
+      if (desktopBackendMode == DesktopBackendMode.gpuOnly) {
+        onModelStatusChanged?.call(
+          '⚠️ GPU 模式启动失败，请检查显卡驱动/显存或切换为「自动模式」',
+        );
+      } else {
+        onModelStatusChanged?.call(
+          '⚠️ 本地模型加载失败或超时，请检查模型文件与系统内存',
+        );
+      }
+    }
+    return false;
+  }
+
+  @visibleForTesting
+  static Future<bool> startWindowsLlamaServerForTest({
+    required File bundledServer,
+    required File targetGguf,
+    required String targetModelId,
+    int maxPollsPerAttempt = 2,
+    bool emitStatus = true,
+  }) {
+    return _startWindowsLlamaServer(
+      bundledServer: bundledServer,
+      targetGguf: targetGguf,
+      targetModelId: targetModelId,
+      maxPollsPerAttempt: maxPollsPerAttempt,
+      emitStatus: emitStatus,
+    );
+  }
+
+  @visibleForTesting
+  static void resetWindowsRuntimeStateForTest() {
+    _idleTimer?.cancel();
+    _idleTimer = null;
+    desktopBackendMode = DesktopBackendMode.autoGpuFallbackCpu;
+    _managedRuntimeProcess = null;
+    _loadedWindowsModelPath = null;
+    _activeWindowsBackend = null;
+    _lastWindowsStartFellBackToCpu = false;
+    _loadedWindowsContextSize = null;
+    _currentlyLoadedModelId = null;
+    windowsServerAttemptRunnerForTest = null;
+    onModelStatusChanged = null;
+  }
+
   /// 预热并提前常驻加载大模型（消除首次提取时的冷启动等待）
   static Future<bool> preloadModel({String? preferredModelId}) async {
     if (_isModelLoading) return false;
@@ -368,74 +663,32 @@ class LocalModelManager {
         final bundledServer = findBundledLlamaServer();
 
         if (bundledServer != null && targetGguf != null && targetGguf.existsSync()) {
-          // 检查当前 llama-server 是否已经在运行该具体模型文件
+          // 检查当前 llama-server 是否已经在运行该具体模型文件且上下文/后端策略兼容
           final isHealthy = await isLlamaServerHealthy();
+          final expectedCtx = resolveWindowsContextSize();
           if (isHealthy &&
               _loadedWindowsModelPath != null &&
-              _loadedWindowsModelPath!.toLowerCase() == targetGguf.path.toLowerCase()) {
+              _loadedWindowsModelPath!.toLowerCase() ==
+                  targetGguf.path.toLowerCase() &&
+              _loadedWindowsContextSize == expectedCtx &&
+              isWindowsBackendCompatible(
+                preference: desktopBackendMode,
+                activeBackend: _activeWindowsBackend,
+              )) {
             _currentlyLoadedModelId = target;
             markActivity();
             onModelStatusChanged?.call('🟢 本地大模型已就绪 (${getModelDisplayName(target)})');
             return true;
           }
 
-          // 模型不匹配或服务未就绪：重启切换 llama-server 挂载目标模型
-          onModelStatusChanged?.call(
-            '⏳ 正在切换并加载模型权重至 GPU: ${targetGguf.path.split(Platform.pathSeparator).last}...',
+          // 模型、上下文或后端策略不匹配，或服务未就绪：重启切换 llama-server 挂载目标模型
+          return await _startWindowsLlamaServer(
+            bundledServer: bundledServer,
+            targetGguf: targetGguf,
+            targetModelId: target,
+            maxPollsPerAttempt: 40,
+            emitStatus: true,
           );
-          if (_managedRuntimeProcess != null) {
-            try {
-              _managedRuntimeProcess!.kill();
-            } catch (_) {}
-            _managedRuntimeProcess = null;
-          }
-          try {
-            await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
-          } catch (_) {}
-          await Future.delayed(const Duration(milliseconds: 300));
-
-          final runtimeDir = bundledServer.parent.path;
-          final cleanEnv = Map<String, String>.from(Platform.environment)
-            ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
-            ..['HTTP_PROXY'] = ''
-            ..['HTTPS_PROXY'] = ''
-            ..['http_proxy'] = ''
-            ..['https_proxy'] = ''
-            ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
-
-          _managedRuntimeProcess = await Process.start(
-            bundledServer.path,
-            [
-              '-m',
-              targetGguf.path,
-              '--port',
-              '11434',
-              '--host',
-              '0.0.0.0',
-              '-ngl',
-              '99',
-              '-c',
-              '4096',
-            ],
-            workingDirectory: runtimeDir,
-            environment: cleanEnv,
-            mode: ProcessStartMode.detached,
-          );
-
-          for (var i = 0; i < 40; i++) {
-            await Future.delayed(const Duration(milliseconds: 600));
-            if (await isLlamaServerHealthy()) {
-              _loadedWindowsModelPath = targetGguf.path;
-              _currentlyLoadedModelId = target;
-              markActivity();
-              onModelStatusChanged?.call(
-                '🟢 本地模型已就绪 (${getModelDisplayName(target)})',
-              );
-              return true;
-            }
-          }
-          onModelStatusChanged?.call('⚠️ 本地模型加载超时，请检查 GPU 显存');
-          return false;
         }
 
         final client = createDirectHttpClient(timeout: const Duration(seconds: 4));
@@ -504,17 +757,7 @@ class LocalModelManager {
         return true;
       } else if (Platform.isWindows) {
         // 若存在知程拉起的独立 llama-server 进程，直接终止以彻底释放 GPU/RAM
-        if (_managedRuntimeProcess != null) {
-          try {
-            _managedRuntimeProcess!.kill();
-          } catch (_) {}
-          _managedRuntimeProcess = null;
-        }
-        try {
-          await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
-        } catch (_) {}
-        await Future.delayed(const Duration(milliseconds: 200));
-        _loadedWindowsModelPath = null;
+        await _stopManagedWindowsRuntime();
         _currentlyLoadedModelId = null;
 
         // 先查询当前常驻在显存/内存中的模型列表（针对外部 Ollama）
@@ -1191,44 +1434,17 @@ class LocalModelManager {
           final targetFile = (preferredModelId != null)
               ? (await findLocalGgufFile(preferredModelId)) ?? ggufFiles.first
               : ggufFiles.first;
+          final targetId = normalizeModelId(
+            targetFile.path.split(RegExp(r'[\\/]')).last,
+          );
           try {
-            final runtimeDir = bundledServer.parent.path;
-            final cleanEnv = Map<String, String>.from(Platform.environment)
-              ..['PATH'] = '$runtimeDir;${Platform.environment['PATH'] ?? ''}'
-              ..['HTTP_PROXY'] = ''
-              ..['HTTPS_PROXY'] = ''
-              ..['http_proxy'] = ''
-              ..['https_proxy'] = ''
-              ..['NO_PROXY'] = '127.0.0.1,localhost,0.0.0.0';
-
-            _managedRuntimeProcess ??= await Process.start(
-              bundledServer.path,
-              [
-                '-m',
-                targetFile.path,
-                '--port',
-                '11434',
-                '--host',
-                '0.0.0.0',
-                '-ngl',
-                '99',
-                '-c',
-                '4096',
-              ],
-              workingDirectory: runtimeDir,
-              environment: cleanEnv,
-              mode: ProcessStartMode.detached,
+            await _startWindowsLlamaServer(
+              bundledServer: bundledServer,
+              targetGguf: targetFile,
+              targetModelId: targetId,
+              maxPollsPerAttempt: 25,
+              emitStatus: false,
             );
-            _loadedWindowsModelPath = targetFile.path;
-
-            for (var i = 0; i < 20; i++) {
-              await Future.delayed(const Duration(milliseconds: 600));
-              if (await isLlamaServerHealthy()) {
-                _currentlyLoadedModelId = normalizeModelId(
-                    targetFile.path.split(RegExp(r'[\\/]')).last);
-                break;
-              }
-            }
           } catch (_) {}
         }
       } else {
@@ -1240,6 +1456,9 @@ class LocalModelManager {
       final isHealthy = await isLlamaServerHealthy();
       if (!isHealthy) {
         _loadedWindowsModelPath = null;
+        _activeWindowsBackend = null;
+        _loadedWindowsContextSize = null;
+        _lastWindowsStartFellBackToCpu = false;
         _currentlyLoadedModelId = null;
       } else {
         if (_currentlyLoadedModelId == null && runningModels.isNotEmpty) {
@@ -1757,17 +1976,10 @@ class LocalModelManager {
     if (targetFile != null && targetFile.existsSync()) {
       if (_managedRuntimeProcess != null ||
           (_loadedWindowsModelPath != null &&
-              _loadedWindowsModelPath!.toLowerCase() == targetFile.path.toLowerCase())) {
-        try {
-          _managedRuntimeProcess?.kill();
-        } catch (_) {}
-        _managedRuntimeProcess = null;
-        _loadedWindowsModelPath = null;
+              _loadedWindowsModelPath!.toLowerCase() ==
+                  targetFile.path.toLowerCase())) {
+        await _stopManagedWindowsRuntime();
         _currentlyLoadedModelId = null;
-        try {
-          await Process.run('taskkill', ['/F', '/IM', 'llama-server.exe']);
-        } catch (_) {}
-        await Future.delayed(const Duration(milliseconds: 300));
       }
       try {
         await targetFile.delete();
