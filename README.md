@@ -1,11 +1,28 @@
-# 知程 (MeetSync / Anno2Agenda)
-
-> **端云协同 AI 驱动的跨端无感通知转日程与智能提醒助手 (Android + Windows)**  
-> *Edge-Cloud Collaborative AI-Powered Cross-Platform Announcement-to-Agenda Assistant*
+<div align="center">
+  <img src="./logo.png" alt="知程 MeetSync Logo" width="108" />
+  <h1>知程 (MeetSync / Anno2Agenda)</h1>
+  <p>
+    <strong>端云协同 AI 驱动的跨端无感通知转日程与智能提醒助手 (Android + Windows)</strong><br>
+    <em>Edge-Cloud Collaborative AI-Powered Cross-Platform Announcement-to-Agenda Assistant</em>
+  </p>
+</div>
 
 **知程 (MeetSync)** 是一款专为解决高校教务通知、竞赛群消息、学术海报、线上会议长文中**“关键日程节点极易遗漏、手动录入日历繁琐、多设备日程分散”**而打造的开源智能日程整理应用。
 
 基于 **Flutter (Android + Windows)** 构建，应用已从纯端侧架构升级为**“端侧隐私优先 + 可选云端增强”的端云双擎协同架构**：融合 **OpenAI-Compatible 云端大模型引擎**、**端侧小语言模型 (GGUF + `llama.cpp`)**、**中文时空规则引擎**、**Android 无障碍读屏** 与 **Google ML Kit 离线中文 OCR**，实现从“看到通知”到“静默写入系统日历并设置提醒”的全链路零跳转闭环。
+
+---
+
+## 界面预览
+
+<div align="center">
+
+| AI 智能提取与端云协同推理 | 日程月视图与系统日历同步 |
+| :---: | :---: |
+| <img src="./image/Screenshot_main_page.jpg" alt="AI 智能提取主界面" width="280" /> | <img src="./image/Screenshot_calender.jpg" alt="我的日程日历视图" width="280" /> |
+| 实时展示时间锚点绑定、引擎路由与深度思考推理流 | 支持农历/节气月视图、结构化日程卡片与系统日历同步标记 |
+
+</div>
 
 ---
 
