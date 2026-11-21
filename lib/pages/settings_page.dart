@@ -107,6 +107,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey _paramModelManagerKey = GlobalKey();
   final GlobalKey _paramIdleUnloadKey = GlobalKey();
   final GlobalKey _paramEngineModeKey = GlobalKey();
+  final GlobalKey _paramDesktopBackendKey = GlobalKey();
   final GlobalKey _paramCalendarSyncKey = GlobalKey();
   final GlobalKey _paramContextSizeKey = GlobalKey();
   final GlobalKey _paramMaxTokensKey = GlobalKey();
@@ -114,7 +115,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final GlobalKey _paramTopPKey = GlobalKey();
   final GlobalKey _paramRepeatPenaltyKey = GlobalKey();
 
-  // 当前激活的抽屉标识（可以是参数 title、'cloudServiceManager'、'cloudModelSelector'、'modelManager'、'idleUnload'、'engineMode' 或 'calendarSync'）
+  // 当前激活的抽屉标识（可以是参数 title、'cloudServiceManager'、'cloudModelSelector'、'modelManager'、'idleUnload'、'engineMode'、'desktopBackend' 或 'calendarSync'）
   String? _activeDrawerId;
   _ModelParamConfig? _activeParamConfig;
   double _tempParamValue = 0.0;
@@ -2631,7 +2632,8 @@ class _SettingsPageState extends State<SettingsPage> {
                             LocalModelManager.currentlyLoadedModelId != null) ...[
                           const SizedBox(height: 1),
                           Text(
-                            '当前模型: ${LocalModelManager.currentlyLoadedModelId}',
+                            '当前模型: ${LocalModelManager.currentlyLoadedModelId}'
+                            '${(Platform.isWindows && LocalModelManager.activeWindowsBackend != null) ? (LocalModelManager.lastWindowsStartFellBackToCpu ? ' · CPU 兜底' : (LocalModelManager.activeWindowsBackend == 'cpu' ? ' · CPU' : ' · GPU')) : ''}',
                             style: TextStyle(
                               fontSize: 11,
                               color: appColors.textSecondary,
@@ -2834,6 +2836,38 @@ class _SettingsPageState extends State<SettingsPage> {
                 );
               },
             ),
+            if (Platform.isWindows) ...[
+              _buildDivider(),
+              // 7. 桌面端推理硬件加速策略（Vulkan GPU / CPU）
+              _buildCompactParamTile(
+                key: _paramDesktopBackendKey,
+                icon: Icons.developer_board_outlined,
+                title: '推理硬件加速',
+                subtitle: _getDesktopBackendSubtitle(
+                  LocalModelManager.desktopBackendMode,
+                ),
+                valueBadge: _getDesktopBackendShortName(
+                  LocalModelManager.desktopBackendMode,
+                ),
+                isEditing: _activeDrawerId == 'desktopBackend',
+                onTap: () {
+                  _openCustomOptionDrawer(
+                    drawerId: 'desktopBackend',
+                    title: '桌面端推理硬件加速',
+                    subtitle: '配置 Windows 本地 llama-server 的 GPU / CPU 运行策略',
+                    icon: Icons.developer_board_outlined,
+                    anchorKey: _paramDesktopBackendKey,
+                    formBuilder: (ctx, setDrawerState, onClose) {
+                      return _buildDesktopBackendForm(
+                        primaryColor: primaryColor,
+                        updateState: setDrawerState,
+                        onClose: onClose,
+                      );
+                    },
+                  );
+                },
+              ),
+            ],
           ],
         ),
       ],
@@ -3249,6 +3283,215 @@ class _SettingsPageState extends State<SettingsPage> {
         const SizedBox(height: 16),
 
         // 3. 完成按钮
+        FilledButton(
+          onPressed: onClose,
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          child: const Text('完成'),
+        ),
+      ],
+    );
+  }
+
+  String _getDesktopBackendShortName(DesktopBackendMode mode) {
+    return switch (mode) {
+      DesktopBackendMode.autoGpuFallbackCpu => '自动 (GPU优先)',
+      DesktopBackendMode.cpuOnly => '纯 CPU',
+      DesktopBackendMode.gpuOnly => '仅 GPU',
+    };
+  }
+
+  String _getDesktopBackendSubtitle(DesktopBackendMode mode) {
+    return switch (mode) {
+      DesktopBackendMode.autoGpuFallbackCpu =>
+        '优先 Vulkan/GPU 加速，启动异常自动降级 CPU',
+      DesktopBackendMode.cpuOnly => '强制纯 CPU 推理（-ngl 0），零显存占用、最高兼容',
+      DesktopBackendMode.gpuOnly => '强制 GPU 加速且不回退 CPU，适合高性能独显',
+    };
+  }
+
+  /// 构建 Windows 桌面端推理硬件加速策略抽屉/Sheet 表单
+  Widget _buildDesktopBackendForm({
+    required Color primaryColor,
+    required StateSetter updateState,
+    required VoidCallback onClose,
+  }) {
+    final colors = context.appColors;
+    final current = LocalModelManager.desktopBackendMode;
+
+    final options = [
+      {
+        'mode': DesktopBackendMode.autoGpuFallbackCpu,
+        'title': '自动模式 (GPU 优先 · CPU 兜底)',
+        'subtitle':
+            '默认启用 Vulkan / GPU 自适应显存卸载；若驱动异常、显存不足或启动崩溃，自动降级为纯 CPU 推理',
+        'tag': '推荐',
+      },
+      {
+        'mode': DesktopBackendMode.cpuOnly,
+        'title': '纯 CPU 模式 (省显存 · 高兼容)',
+        'subtitle':
+            '强制关闭显卡卸载（-ngl 0 --device none），完全使用系统内存与 CPU 指令集，适合核显或低显存设备',
+        'tag': '零显存',
+      },
+      {
+        'mode': DesktopBackendMode.gpuOnly,
+        'title': '仅 GPU 模式 (高性能 · 不降级)',
+        'subtitle':
+            '强制使用 GPU 自适应卸载，启动失败时不自动切换至 CPU，便于排查独显加速或保证最高吞吐',
+        'tag': '独显直连',
+      },
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: colors.surfaceLow,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: colors.borderSubtle),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(Icons.info_outline, size: 16, color: primaryColor),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '内置 llama-server 支持 Vulkan GPU 与 CPU 多指令集动态后端加载。切换与当前运行状态不兼容的策略时，将自动卸载旧服务并在下次推理或预热时生效。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: colors.textSecondary,
+                    height: 1.45,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        ...options.map((opt) {
+          final mode = opt['mode'] as DesktopBackendMode;
+          final isSelected = current == mode;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: InkWell(
+              onTap: () async {
+                updateState(() {
+                  LocalModelManager.desktopBackendMode = mode;
+                });
+                await AppSettingsService.instance.setDesktopBackendMode(mode);
+                if (LocalModelManager.loadedWindowsModelPath != null &&
+                    !LocalModelManager.isWindowsBackendCompatible(
+                      preference: mode,
+                      activeBackend: LocalModelManager.activeWindowsBackend,
+                    )) {
+                  await LocalModelManager.unloadModel(
+                    reason: '切换推理硬件后端',
+                  );
+                  widget.onStateRefreshed();
+                }
+                if (!mounted) return;
+                setState(() {});
+                _showSnack('已切换为「${opt['title']}」');
+                onClose();
+              },
+              borderRadius: BorderRadius.circular(10),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? primaryColor.withValues(alpha: 0.10)
+                      : colors.surfaceLow,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isSelected ? primaryColor : colors.borderSubtle,
+                    width: isSelected ? 1.5 : 1.0,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      size: 18,
+                      color: isSelected ? primaryColor : colors.textTertiary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  opt['title'] as String,
+                                  style: TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: isSelected
+                                        ? FontWeight.bold
+                                        : FontWeight.w600,
+                                    color: isSelected
+                                        ? primaryColor
+                                        : colors.textPrimary,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isSelected
+                                      ? primaryColor.withValues(alpha: 0.18)
+                                      : colors.borderSubtle
+                                          .withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  opt['tag'] as String,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.bold,
+                                    color: isSelected
+                                        ? primaryColor
+                                        : colors.textSecondary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            opt['subtitle'] as String,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: colors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }),
+        const SizedBox(height: 16),
         FilledButton(
           onPressed: onClose,
           style: FilledButton.styleFrom(
@@ -4355,6 +4598,15 @@ class _SettingsPageState extends State<SettingsPage> {
           drawerSubtitle = '选择日程提取时的 AI 推理模式与兜底机制';
           drawerIcon = Icons.alt_route_rounded;
           formContent = _buildEngineModeForm(
+            primaryColor: primaryColor,
+            updateState: setDrawerState,
+            onClose: _closeDrawer,
+          );
+        } else if (_activeDrawerId == 'desktopBackend') {
+          drawerTitle = '桌面端推理硬件加速';
+          drawerSubtitle = '配置 Windows 本地 llama-server 的 GPU / CPU 运行策略';
+          drawerIcon = Icons.developer_board_outlined;
+          formContent = _buildDesktopBackendForm(
             primaryColor: primaryColor,
             updateState: setDrawerState,
             onClose: _closeDrawer,
