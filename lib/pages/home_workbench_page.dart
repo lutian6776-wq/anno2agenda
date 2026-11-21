@@ -77,8 +77,6 @@ class _HomeWorkbenchPageState extends State<HomeWorkbenchPage> {
     AIExtractorService.currentEngineMode = _engineMode;
     AIExtractorService.currentPreferredModel = _selectedModelName;
     AIExtractorService.currentLlmEndpoint = _llmEndpointController.text;
-    _inputController.text =
-        AIExtractPage.sampleAnnouncements.first['text']!;
 
     LocalModelManager.onModelStatusChanged = (msg) {
       if (!mounted) return;

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/agenda_event.dart';
@@ -835,39 +836,6 @@ class _AIExtractPageState extends State<AIExtractPage> {
                     ),
                   ),
                 ),
-                if (_isExtracting) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: primaryColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 10,
-                          height: 10,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 1.5,
-                            color: primaryColor,
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          '正在解析...',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: primaryColor,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
                 const Spacer(),
                 Tooltip(
                   message: '重新编辑原文',
@@ -1010,17 +978,12 @@ class _AIExtractPageState extends State<AIExtractPage> {
       elevation: 3,
       highlightElevation: 6,
       icon: _isExtracting
-          ? SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: context.colorScheme.onPrimary,
-              ),
+          ? _BouncingDotsIndicator(
+              color: context.colorScheme.onPrimary,
             )
           : const Icon(Icons.add, size: 20),
       label: Text(
-        _isExtracting ? '解析中...' : '粘贴解析',
+        _isExtracting ? '解析中' : '粘贴解析',
         style: const TextStyle(fontWeight: FontWeight.bold),
       ),
     );
@@ -1592,9 +1555,22 @@ class _AIExtractDrawerContent extends StatefulWidget {
 }
 
 class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
+  late final TextEditingController _draftController;
   bool _isLoading = false;
 
   bool get _effectiveExtracting => _isLoading || widget.isExtracting;
+
+  @override
+  void initState() {
+    super.initState();
+    _draftController = TextEditingController(text: widget.controller.text);
+  }
+
+  @override
+  void dispose() {
+    _draftController.dispose();
+    super.dispose();
+  }
 
   Future<void> _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -1605,8 +1581,8 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
       return;
     }
     setState(() {
-      widget.controller.text = text;
-      widget.controller.selection = TextSelection.fromPosition(
+      _draftController.text = text;
+      _draftController.selection = TextSelection.fromPosition(
         TextPosition(offset: text.length),
       );
     });
@@ -1615,19 +1591,22 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
   void _fillSample(int idx) {
     final sample = AIExtractPage.sampleAnnouncements[idx];
     setState(() {
-      widget.controller.text = sample['text']!;
-      widget.controller.selection = TextSelection.fromPosition(
-        TextPosition(offset: widget.controller.text.length),
+      _draftController.text = sample['text']!;
+      _draftController.selection = TextSelection.fromPosition(
+        TextPosition(offset: _draftController.text.length),
       );
     });
   }
 
   Future<void> _handleExtract() async {
-    final text = widget.controller.text.trim();
+    final text = _draftController.text.trim();
     if (text.isEmpty) {
       AppToast.show(context, '请先输入或粘贴通知内容');
       return;
     }
+
+    // 正式提交时才写入外部控制器，避免抽屉内草稿或示例未提交即显示到主页
+    widget.controller.text = text;
 
     // 1. 在抽屉中点击开始解析按钮后立刻收起抽屉，平滑回到主界面
     widget.onClose();
@@ -1776,7 +1755,7 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
 
             // 3. 核心区域多行文本输入框 (TextField)
             TextField(
-              controller: widget.controller,
+              controller: _draftController,
               maxLines: widget.isBottom ? 6 : 10,
               minLines: 4,
               enabled: !_effectiveExtracting,
@@ -1817,7 +1796,7 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
             ),
             const SizedBox(height: 16),
 
-            // 4. 底部主操作按钮：“AI 提取结构化日程”（导航栏人工智能图标，无 emoji）
+            // 4. 底部主操作按钮：“AI 提取结构化日程”
             SizedBox(
               height: 48,
               child: FilledButton.icon(
@@ -1850,6 +1829,81 @@ class _AIExtractDrawerContentState extends State<_AIExtractDrawerContent> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 右下角按钮使用的三点跳动加载指示器
+class _BouncingDotsIndicator extends StatefulWidget {
+  final Color color;
+
+  const _BouncingDotsIndicator({required this.color});
+
+  @override
+  State<_BouncingDotsIndicator> createState() => _BouncingDotsIndicatorState();
+}
+
+class _BouncingDotsIndicatorState extends State<_BouncingDotsIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 22,
+      height: 18,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(3, (index) {
+              final phase = (_controller.value - index * 0.18) % 1.0;
+              final normalized = phase < 0 ? phase + 1.0 : phase;
+              // 在前半周期平滑向上跳起，后半周期落回基准线
+              final bounce = normalized < 0.5
+                  ? math.sin(normalized * 2 * math.pi)
+                  : 0.0;
+              final dy = -3.5 * bounce;
+              final opacity = 0.55 + 0.45 * bounce;
+
+              return Padding(
+                padding: EdgeInsets.only(right: index < 2 ? 3.0 : 0.0),
+                child: Transform.translate(
+                  offset: Offset(0, dy),
+                  child: Opacity(
+                    opacity: opacity.clamp(0.4, 1.0),
+                    child: Container(
+                      width: 4.5,
+                      height: 4.5,
+                      decoration: BoxDecoration(
+                        color: widget.color,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          );
+        },
       ),
     );
   }
